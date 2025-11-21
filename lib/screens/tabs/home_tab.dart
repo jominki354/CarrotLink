@@ -141,53 +141,7 @@ class _HomeTabState extends State<HomeTab> {
           ),
         ),
         
-        const SizedBox(height: 24),
-        Text(
-          "빠른 실행",
-          style: Theme.of(context).textTheme.titleMedium,
-        ),
-        const SizedBox(height: 16),
-        
-        // Quick Actions Grid
-        GridView.count(
-          shrinkWrap: true,
-          physics: const NeverScrollableScrollPhysics(),
-          crossAxisCount: 2,
-          mainAxisSpacing: 16,
-          crossAxisSpacing: 16,
-          childAspectRatio: 1.5,
-          children: [
-            _buildQuickActionCard(
-              context,
-              "Git Pull",
-              Icons.download,
-              () async {
-                final ssh = Provider.of<SSHService>(context, listen: false);
-                await ssh.executeCommand("cd /data/openpilot && git pull");
-                if (context.mounted) {
-                  ScaffoldMessenger.of(context).showSnackBar(
-                    const SnackBar(content: Text("Git Pull 실행됨")),
-                  );
-                }
-              },
-            ),
-            _buildQuickActionCard(
-              context,
-              "재부팅",
-              Icons.restart_alt,
-              () async {
-                 final ssh = Provider.of<SSHService>(context, listen: false);
-                 await ssh.executeCommand("sudo reboot");
-                 if (context.mounted) {
-                  ScaffoldMessenger.of(context).showSnackBar(
-                    const SnackBar(content: Text("재부팅 중...")),
-                  );
-                }
-              },
-              isDestructive: true,
-            ),
-          ],
-        ),
+        // Quick Actions Grid Removed
 
         const SizedBox(height: 24),
         Text(
@@ -196,7 +150,7 @@ class _HomeTabState extends State<HomeTab> {
         ),
         const SizedBox(height: 16),
         const SizedBox(
-          height: 300,
+          height: 260, // Adjusted height for horizontal list
           child: DriveListWidget(),
         ),
 
@@ -245,9 +199,41 @@ class _HomeTabState extends State<HomeTab> {
             onPressed: () => _restoreSettings(slot),
             tooltip: "복원",
           ),
+          IconButton(
+            icon: const Icon(Icons.delete_outline, color: Colors.red),
+            onPressed: () => _deleteBackup(slot),
+            tooltip: "삭제",
+          ),
         ],
       ),
     );
+  }
+
+  Future<void> _deleteBackup(int slot) async {
+    try {
+      final dir = await getApplicationDocumentsDirectory();
+      final file = File('${dir.path}/params_backup_$slot.json');
+      if (await file.exists()) {
+        await file.delete();
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(content: Text("슬롯 $slot 백업이 삭제되었습니다.")),
+          );
+        }
+      } else {
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(content: Text("삭제할 백업 파일이 없습니다.")),
+          );
+        }
+      }
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text("삭제 실패: $e")),
+        );
+      }
+    }
   }
 
   Future<void> _viewBackup(int slot) async {
@@ -304,16 +290,17 @@ class _HomeTabState extends State<HomeTab> {
         builder: (_) => const Center(child: CircularProgressIndicator()),
       );
       
-      // 1. List params
-      final output = await ssh.executeCommand("ls /data/params/d");
-      final keys = output.split('\n').map((e) => e.trim()).where((e) => e.isNotEmpty).toList();
+      // 1. Fetch params using python script (Fleet Manager style)
+      // manager.py의 get_default_params_key()를 사용하여 정의된 모든 파라미터를 가져옵니다.
+      // Added PYTHONPATH and error handling. Also source launch_env.sh to ensure environment is correct.
+      const cmd = "cd /data/openpilot && source launch_env.sh && export PYTHONPATH=\$PWD && python -c \"import json; import sys; sys.path.append('/data/openpilot'); from openpilot.common.params import Params; from openpilot.system.manager.manager import get_default_params_key; params = Params(); print(json.dumps({k: (params.get(k).decode('utf-8') if params.get(k) is not None else '0') for k in get_default_params_key()}))\"";
+      final output = await ssh.executeCommand(cmd);
       
-      // 2. Read values
-      final Map<String, String> params = {};
-      for (final key in keys) {
-        final value = await ssh.executeCommand("cat /data/params/d/$key");
-        params[key] = value;
-      }
+      if (output.trim().isEmpty) throw Exception("데이터를 가져오지 못했습니다.");
+      if (output.trim().startsWith("Traceback") || output.contains("ModuleNotFoundError")) throw Exception("Python 스크립트 오류: $output");
+
+      // 2. Parse JSON
+      final Map<String, dynamic> params = jsonDecode(output.trim());
       
       // 3. Save to local
       final dir = await getApplicationDocumentsDirectory();
@@ -322,7 +309,7 @@ class _HomeTabState extends State<HomeTab> {
       
       if (!mounted) return;
       Navigator.pop(context);
-      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text("슬롯 $slot 백업 완료: ${keys.length}개 항목")));
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text("슬롯 $slot 백업 완료: ${params.length}개 항목")));
     } catch (e) {
       if (mounted) {
         Navigator.pop(context);
@@ -355,18 +342,18 @@ class _HomeTabState extends State<HomeTab> {
         builder: (_) => const Center(child: CircularProgressIndicator()),
       );
 
-      int count = 0;
-      for (final entry in params.entries) {
-        final key = entry.key;
-        final value = entry.value.toString();
-        final escapedValue = value.replaceAll("'", "'\\''");
-        await ssh.executeCommand("echo -n '$escapedValue' > /data/params/d/$key");
-        count++;
-      }
+      // Use Python to restore (Fleet Manager style)
+      final jsonStr = jsonEncode(params);
+      // Escape single quotes for shell command
+      final escapedJson = jsonStr.replaceAll("'", "'\\''");
+      
+      final cmd = "cd /data/openpilot && source launch_env.sh && export PYTHONPATH=\$PWD && python -c \"import json; import sys; sys.path.append('/data/openpilot'); from openpilot.common.params import Params; params = Params(); data = json.loads('$escapedJson'); [params.put(k, str(v)) for k,v in data.items()]\"";
+      
+      await ssh.executeCommand(cmd);
 
       if (!mounted) return;
       Navigator.pop(context);
-      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text("슬롯 $slot 복원 완료: $count개 항목")));
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text("슬롯 $slot 복원 완료: ${params.length}개 항목")));
     } catch (e) {
       if (mounted) {
         Navigator.pop(context);
