@@ -1,0 +1,29 @@
+{
+  "project_info": {
+    "project_number": "1037570012024",
+    "project_id": "carrotlink-757cc",
+    "storage_bucket": "carrotlink-757cc.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:1037570012024:android:38cbe98754d80513df4e8d",
+        "android_client_info": {
+          "package_name": "com.example.carrot_pilot_manager"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyD0Nxy3t5-BgDD81c0ohZ47OXRn7fV41gw"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}

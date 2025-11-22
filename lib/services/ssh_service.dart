@@ -181,6 +181,22 @@ class SSHService extends ChangeNotifier {
     return (await executeCommand("cd /data/openpilot && git rev-parse --abbrev-ref HEAD")).trim();
   }
 
+  Future<String> getDongleId() async {
+    try {
+      return (await executeCommand("cat /data/params/d/DongleId")).trim();
+    } catch (e) {
+      return "Unknown";
+    }
+  }
+
+  Future<String> getSerial() async {
+    try {
+      return (await executeCommand("cat /data/params/d/HardwareSerial")).trim();
+    } catch (e) {
+      return "Unknown";
+    }
+  }
+
   Future<String> getCpuTemp() async {
     // This path might vary depending on the device (C2/C3). Using a generic thermal zone.
     // Often thermal_zone0 is CPU.
@@ -210,6 +226,7 @@ class SSHService extends ChangeNotifier {
   }
 
   Future<void> startDiscovery() async {
+    // 1. Start UDP Listener (Passive)
     try {
       _udpSocket = await RawDatagramSocket.bind(InternetAddress.anyIPv4, 7705);
       _udpSocket!.listen((RawSocketEvent event) {
@@ -232,11 +249,88 @@ class SSHService extends ChangeNotifier {
     } catch (e) {
       print("Error binding UDP socket: $e");
     }
+
+    // 2. Start Active Subnet Scan
+    _scanSubnet();
+  }
+
+  Future<void> _scanSubnet() async {
+    try {
+      final interfaces = await NetworkInterface.list(
+        type: InternetAddressType.IPv4,
+        includeLinkLocal: false,
+      );
+
+      for (final interface in interfaces) {
+        for (final addr in interface.addresses) {
+          if (addr.isLoopback) continue;
+          
+          final ip = addr.address;
+          final parts = ip.split('.');
+          if (parts.length != 4) continue;
+
+          final prefix = "${parts[0]}.${parts[1]}.${parts[2]}";
+          
+          // Scan 1-254 in parallel
+          final futures = <Future>[];
+          for (int i = 1; i < 255; i++) {
+            final targetIp = "$prefix.$i";
+            if (targetIp == ip) continue; // Skip self
+
+            futures.add(_checkPort(targetIp, 22));
+          }
+          await Future.wait(futures);
+        }
+      }
+    } catch (e) {
+      print("Subnet scan error: $e");
+    }
+  }
+
+  Future<void> _checkPort(String ip, int port) async {
+    try {
+      final socket = await Socket.connect(ip, port, timeout: const Duration(milliseconds: 500));
+      socket.destroy();
+      _ipDiscoveryController.add(ip);
+      print("Found openpilot at $ip");
+    } catch (e) {
+      // Connection failed or timed out
+    }
   }
 
   void stopDiscovery() {
     _udpSocket?.close();
     _udpSocket = null;
+  }
+
+  // Git Status
+  bool _hasGitUpdate = false;
+  bool get hasGitUpdate => _hasGitUpdate;
+
+  Future<void> checkGitUpdates() async {
+    if (!isConnected) return;
+    try {
+      // Fetch latest info
+      await executeCommand("cd /data/openpilot && git fetch --all");
+      
+      // Get current branch
+      final currentBranch = (await executeCommand("cd /data/openpilot && git rev-parse --abbrev-ref HEAD")).trim();
+      
+      // Get local hash
+      final localHash = (await executeCommand("cd /data/openpilot && git rev-parse HEAD")).trim();
+      
+      // Get remote hash
+      final remoteHash = (await executeCommand("cd /data/openpilot && git rev-parse origin/$currentBranch")).trim();
+
+      if (localHash.isNotEmpty && remoteHash.isNotEmpty && localHash != remoteHash) {
+        _hasGitUpdate = true;
+      } else {
+        _hasGitUpdate = false;
+      }
+      notifyListeners();
+    } catch (e) {
+      print("Git update check failed: $e");
+    }
   }
 
   @override

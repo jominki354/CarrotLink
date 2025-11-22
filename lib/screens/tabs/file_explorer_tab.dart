@@ -3,6 +3,7 @@ import 'package:dartssh2/dartssh2.dart';
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+import 'package:path/path.dart' as p;
 import '../../services/ssh_service.dart';
 
 class FileExplorerTab extends StatefulWidget {
@@ -25,7 +26,16 @@ class _FileExplorerTabState extends State<FileExplorerTab> {
   void initState() {
     super.initState();
     _loadBookmarks();
-    _loadFiles();
+    // _loadFiles(); // Removed to prevent "Not connected" error on startup
+  }
+
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    final ssh = Provider.of<SSHService>(context);
+    if (ssh.isConnected && _files.isEmpty && !_isLoading) {
+      _loadFiles();
+    }
   }
 
   Future<void> _loadBookmarks() async {
@@ -93,8 +103,10 @@ class _FileExplorerTabState extends State<FileExplorerTab> {
   }
 
   Future<void> _loadFiles() async {
-    setState(() => _isLoading = true);
     final ssh = Provider.of<SSHService>(context, listen: false);
+    if (!ssh.isConnected) return;
+
+    setState(() => _isLoading = true);
     try {
       final files = await ssh.listFiles(_currentPath);
       if (mounted) {
@@ -127,17 +139,65 @@ class _FileExplorerTabState extends State<FileExplorerTab> {
     });
   }
 
-  void _navigate(String path) {
-    setState(() => _currentPath = path);
-    _loadFiles();
+  Future<void> _navigate(String path) async {
+    setState(() => _isLoading = true);
+    final ssh = Provider.of<SSHService>(context, listen: false);
+    try {
+      // Normalize path to avoid double slashes or weird segments
+      final normalizedPath = p.posix.normalize(path);
+      final files = await ssh.listFiles(normalizedPath);
+      if (mounted) {
+        setState(() {
+          _currentPath = normalizedPath;
+          _files = files.where((f) => f.filename != '.' && f.filename != '..').toList();
+          _filterFiles();
+          _isLoading = false;
+        });
+      }
+    } catch (e) {
+      if (mounted) {
+        setState(() => _isLoading = false);
+        
+        // Check if it's a "No such file" error
+        final errorStr = e.toString();
+        if (errorStr.contains("No such file") || errorStr.contains("code 2")) {
+           _showPathNotFoundError(path);
+        } else {
+           ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text("이동 실패: $path\n$e")));
+        }
+      }
+    }
+  }
+
+  void _showPathNotFoundError(String path) {
+    showDialog(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text("경로를 찾을 수 없음"),
+        content: Text("'$path' 경로가 존재하지 않습니다.\n북마크에서 제거하시겠습니까?"),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context),
+            child: const Text("취소"),
+          ),
+          if (_bookmarks.contains(path))
+            TextButton(
+              onPressed: () {
+                _removeBookmark(path);
+                Navigator.pop(context);
+                ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text("북마크가 제거되었습니다.")));
+              },
+              child: const Text("북마크 제거", style: TextStyle(color: Colors.red)),
+            ),
+        ],
+      ),
+    );
   }
 
   void _goUp() {
     if (_currentPath == "/") return;
-    final parts = _currentPath.split('/');
-    if (parts.isNotEmpty) parts.removeLast();
-    final newPath = parts.isEmpty ? "/" : parts.join('/');
-    _navigate(newPath == "" ? "/" : newPath);
+    final newPath = p.posix.dirname(_currentPath);
+    _navigate(newPath);
   }
 
   void _goHome() {
@@ -164,9 +224,7 @@ class _FileExplorerTabState extends State<FileExplorerTab> {
     if (confirm == true && mounted) {
       final ssh = Provider.of<SSHService>(context, listen: false);
       try {
-        final fullPath = _currentPath.endsWith('/') 
-            ? "$_currentPath${item.filename}" 
-            : "$_currentPath/${item.filename}";
+        final fullPath = p.posix.join(_currentPath, item.filename);
         await ssh.deleteFile(fullPath);
         _loadFiles();
         if (mounted) {
@@ -182,9 +240,7 @@ class _FileExplorerTabState extends State<FileExplorerTab> {
 
   Future<void> _editFile(SftpName item) async {
     final ssh = Provider.of<SSHService>(context, listen: false);
-    final fullPath = _currentPath.endsWith('/') 
-        ? "$_currentPath${item.filename}" 
-        : "$_currentPath/${item.filename}";
+    final fullPath = p.posix.join(_currentPath, item.filename);
     
     try {
       // Check file size first. If too big, warn or skip.
@@ -210,7 +266,39 @@ class _FileExplorerTabState extends State<FileExplorerTab> {
       
     } catch (e) {
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text("파일 읽기 실패: $e")));
+        String title = "파일 열기 실패";
+        String message = "파일을 읽는 도중 오류가 발생했습니다.";
+        
+        final errorStr = e.toString();
+        if (errorStr.contains("code 4") || errorStr.contains("Failure")) {
+          if (item.attr.isSymbolicLink) {
+             message = "심볼릭 링크가 가리키는 원본 파일을 찾을 수 없거나 접근할 수 없습니다.";
+          } else {
+             message = "파일을 읽을 수 없습니다. (시스템 오류)";
+          }
+        } else if (errorStr.contains("Permission denied")) {
+           message = "파일에 접근할 권한이 없습니다.";
+        }
+
+        showDialog(
+          context: context,
+          builder: (ctx) => AlertDialog(
+            title: Text(title),
+            content: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(message),
+                const SizedBox(height: 8),
+                const Text("상세 오류:", style: TextStyle(fontWeight: FontWeight.bold, fontSize: 12)),
+                Text(errorStr, style: const TextStyle(fontSize: 12, color: Colors.grey)),
+              ],
+            ),
+            actions: [
+              TextButton(onPressed: () => Navigator.pop(ctx), child: const Text("확인")),
+            ],
+          ),
+        );
       }
     }
   }
@@ -232,8 +320,8 @@ class _FileExplorerTabState extends State<FileExplorerTab> {
     if (newName != null && newName.isNotEmpty && newName != item.filename) {
       final ssh = Provider.of<SSHService>(context, listen: false);
       try {
-        final oldPath = _currentPath.endsWith('/') ? "$_currentPath${item.filename}" : "$_currentPath/${item.filename}";
-        final newPath = _currentPath.endsWith('/') ? "$_currentPath$newName" : "$_currentPath/$newName";
+        final oldPath = p.posix.join(_currentPath, item.filename);
+        final newPath = p.posix.join(_currentPath, newName);
         await ssh.renameFile(oldPath, newPath);
         _loadFiles();
         if (mounted) ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text("이름 변경됨")));
@@ -266,7 +354,7 @@ class _FileExplorerTabState extends State<FileExplorerTab> {
     if (perms != null && perms.isNotEmpty) {
       final ssh = Provider.of<SSHService>(context, listen: false);
       try {
-        final fullPath = _currentPath.endsWith('/') ? "$_currentPath${item.filename}" : "$_currentPath/${item.filename}";
+        final fullPath = p.posix.join(_currentPath, item.filename);
         await ssh.executeCommand("chmod $perms $fullPath");
         _loadFiles();
         if (mounted) ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text("권한 변경됨")));
@@ -362,18 +450,17 @@ class _FileExplorerTabState extends State<FileExplorerTab> {
             itemBuilder: (context, index) {
               final item = _filteredFiles[index];
               final isDir = item.attr.isDirectory;
+              final isLink = item.attr.isSymbolicLink;
               return ListTile(
                 leading: Icon(
-                  isDir ? Icons.folder : Icons.insert_drive_file,
-                  color: isDir ? Colors.amber : Colors.grey,
+                  isDir ? Icons.folder : (isLink ? Icons.link : Icons.insert_drive_file),
+                  color: isDir ? Colors.amber : (isLink ? Colors.blue : Colors.grey),
                 ),
                 title: Text(item.filename),
                 subtitle: isDir ? null : Text(item.attr.size != null ? "${(item.attr.size! / 1024).toStringAsFixed(1)} KB" : ""),
                 onTap: () {
                   if (isDir) {
-                    final newPath = _currentPath.endsWith('/') 
-                        ? "$_currentPath${item.filename}" 
-                        : "$_currentPath/${item.filename}";
+                    final newPath = p.posix.join(_currentPath, item.filename);
                     _navigate(newPath);
                   } else {
                     _editFile(item);

@@ -52,13 +52,63 @@ class _FileEditorScreenState extends State<FileEditorScreen> {
   }
 
   Future<void> _save() async {
+    bool createBackup = false;
+    
+    final shouldSave = await showDialog<bool>(
+      context: context,
+      builder: (context) {
+        return StatefulBuilder(
+          builder: (context, setState) {
+            return AlertDialog(
+              title: const Text("파일 저장"),
+              content: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  const Text("변경 사항을 저장하시겠습니까?"),
+                  const SizedBox(height: 16),
+                  CheckboxListTile(
+                    title: const Text("백업본 만들기 (.backup)"),
+                    value: createBackup,
+                    onChanged: (value) {
+                      setState(() => createBackup = value ?? false);
+                    },
+                    controlAffinity: ListTileControlAffinity.leading,
+                    contentPadding: EdgeInsets.zero,
+                  ),
+                ],
+              ),
+              actions: [
+                TextButton(
+                  onPressed: () => Navigator.of(context).pop(false),
+                  child: const Text("취소"),
+                ),
+                TextButton(
+                  onPressed: () => Navigator.of(context).pop(true),
+                  child: const Text("저장"),
+                ),
+              ],
+            );
+          },
+        );
+      },
+    );
+
+    if (shouldSave != true) return;
+
     final ssh = Provider.of<SSHService>(context, listen: false);
     try {
+      // Save main file
       await ssh.writeTextFile(widget.filePath, _controller.text);
+      
+      // Save backup if requested
+      if (createBackup) {
+        await ssh.writeTextFile("${widget.filePath}.backup", _controller.text);
+      }
+
       setState(() => _isDirty = false);
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text("저장되었습니다.")),
+          SnackBar(content: Text(createBackup ? "저장 및 백업 완료" : "저장되었습니다.")),
         );
       }
     } catch (e) {

@@ -31,7 +31,11 @@ class _GitTabState extends State<GitTab> {
       try {
         final List<dynamic> decoded = jsonDecode(storedLogs);
         setState(() {
-          _logs = decoded.map((e) => Map<String, String>.from(e)).toList();
+          _logs = decoded.map((e) {
+            final map = Map<String, String>.from(e);
+            map['isOld'] = 'true'; // Mark loaded logs as old
+            return map;
+          }).toList();
         });
         // Scroll to bottom after loading
         WidgetsBinding.instance.addPostFrameCallback((_) {
@@ -51,6 +55,10 @@ class _GitTabState extends State<GitTab> {
     if (_logs.length > 100) {
       _logs = _logs.sublist(_logs.length - 100);
     }
+    // Don't save 'isOld' property to disk, or just ignore it when loading
+    // Actually, we can save it, but when we load next time, EVERYTHING becomes old.
+    // So we should strip 'isOld' before saving, or just save as is and override on load.
+    // Let's save as is.
     final String encoded = jsonEncode(_logs);
     await prefs.setString('git_logs', encoded);
   }
@@ -58,7 +66,7 @@ class _GitTabState extends State<GitTab> {
   void _addLog(String message) {
     final time = DateFormat('HH:mm:ss').format(DateTime.now());
     setState(() {
-      _logs.add({'time': time, 'message': message});
+      _logs.add({'time': time, 'message': message, 'isOld': 'false'});
     });
     _saveLogs(); // Save on every log add
     WidgetsBinding.instance.addPostFrameCallback((_) {
@@ -72,11 +80,24 @@ class _GitTabState extends State<GitTab> {
     });
   }
 
+  Future<void> _clearLogs() async {
+    setState(() {
+      _logs.clear();
+    });
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.remove('git_logs');
+  }
+
   Future<void> _runGitCommand(BuildContext context, String command, String successMessage) async {
+    final ssh = Provider.of<SSHService>(context, listen: false);
+    if (!ssh.isConnected) {
+      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text("기기와 연결되어 있지 않습니다.")));
+      return;
+    }
+
     setState(() => _isLoading = true);
     _addLog("명령어 실행: $command");
 
-    final ssh = Provider.of<SSHService>(context, listen: false);
     final result = await ssh.executeCommand("cd /data/openpilot && $command");
 
     if (mounted) {
@@ -91,11 +112,19 @@ class _GitTabState extends State<GitTab> {
   }
 
   Future<void> _selectBranch(BuildContext context) async {
+    final ssh = Provider.of<SSHService>(context, listen: false);
+    if (!ssh.isConnected) {
+      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text("기기와 연결되어 있지 않습니다.")));
+      return;
+    }
+
     setState(() => _isLoading = true);
     _addLog("브랜치 목록 가져오는 중...");
-    final ssh = Provider.of<SSHService>(context, listen: false);
     
     try {
+      // Fetch latest info from remote
+      await ssh.executeCommand("cd /data/openpilot && git fetch --all");
+
       // Get Repo URL
       String repoUrl = "";
       try {
@@ -162,84 +191,16 @@ class _GitTabState extends State<GitTab> {
 
       showDialog(
         context: context,
-        builder: (ctx) => AlertDialog(
-          title: const Text("브랜치 선택"),
-          content: SizedBox(
-            width: double.maxFinite,
-            child: ListView.builder(
-              shrinkWrap: true,
-              itemCount: branches.length,
-              itemBuilder: (ctx, index) {
-                final branch = branches[index];
-                final name = branch['name']!;
-                final date = branch['date']!;
-                final hash = branch['hash']!;
-                final isDefault = name == defaultBranch;
-                final isCurrent = name == currentBranch;
-                
-                // Check if update available
-                bool hasUpdate = false;
-                if (localRefs.containsKey(name)) {
-                  if (localRefs[name] != hash) {
-                    hasUpdate = true;
-                  }
-                }
-
-                return ListTile(
-                  title: Row(
-                    children: [
-                      Text(name, style: TextStyle(fontWeight: isDefault ? FontWeight.bold : FontWeight.normal)),
-                      if (isDefault) ...[
-                        const SizedBox(width: 8),
-                        Container(
-                          padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
-                          decoration: BoxDecoration(
-                            color: Colors.blue.withOpacity(0.2),
-                            borderRadius: BorderRadius.circular(4),
-                          ),
-                          child: const Text("Default", style: TextStyle(fontSize: 10, color: Colors.blue)),
-                        ),
-                      ],
-                      if (isCurrent) ...[
-                        const SizedBox(width: 8),
-                        const Icon(Icons.check, size: 16, color: Colors.green),
-                      ],
-                    ],
-                  ),
-                  subtitle: Text(date, style: const TextStyle(fontSize: 12, color: Colors.grey)),
-                  trailing: hasUpdate 
-                    ? IconButton(
-                        icon: const Icon(Icons.priority_high, color: Colors.red, size: 20),
-                        onPressed: () async {
-                           if (repoUrl.isNotEmpty) {
-                             final url = "$repoUrl/commits/$name";
-                             final uri = Uri.parse(url);
-                             if (await canLaunchUrl(uri)) {
-                               await launchUrl(uri, mode: LaunchMode.externalApplication);
-                             } else {
-                               if (context.mounted) {
-                                 showDialog(
-                                   context: context,
-                                   builder: (_) => AlertDialog(
-                                     title: const Text("커밋 내역"),
-                                     content: SelectableText(url),
-                                     actions: [TextButton(onPressed: () => Navigator.pop(context), child: const Text("닫기"))],
-                                   ),
-                                 );
-                               }
-                             }
-                           }
-                        },
-                      ) 
-                    : null,
-                  onTap: () {
-                    Navigator.pop(ctx);
-                    _runGitCommand(context, "git checkout $name", "$name 브랜치로 변경됨");
-                  },
-                );
-              },
-            ),
-          ),
+        builder: (ctx) => _BranchListDialog(
+          branches: branches,
+          defaultBranch: defaultBranch,
+          currentBranch: currentBranch,
+          localRefs: localRefs,
+          repoUrl: repoUrl,
+          onSelect: (name) {
+            Navigator.pop(ctx);
+            _runGitCommand(context, "git checkout $name", "$name 브랜치로 변경됨");
+          },
         ),
       );
     } catch (e) {
@@ -309,11 +270,21 @@ class _GitTabState extends State<GitTab> {
               const Text("로그:", style: TextStyle(fontWeight: FontWeight.bold)),
               const Spacer(),
               if (_isLoading)
-                const SizedBox(
-                  width: 16,
-                  height: 16,
-                  child: CircularProgressIndicator(strokeWidth: 2),
+                const Padding(
+                  padding: EdgeInsets.only(right: 8.0),
+                  child: SizedBox(
+                    width: 16,
+                    height: 16,
+                    child: CircularProgressIndicator(strokeWidth: 2),
+                  ),
                 ),
+              IconButton(
+                icon: const Icon(Icons.delete_outline, size: 20),
+                onPressed: _clearLogs,
+                tooltip: "로그 지우기",
+                padding: EdgeInsets.zero,
+                constraints: const BoxConstraints(),
+              ),
             ],
           ),
           const SizedBox(height: 5),
@@ -330,6 +301,9 @@ class _GitTabState extends State<GitTab> {
                 itemCount: _logs.length,
                 itemBuilder: (context, index) {
                   final log = _logs[index];
+                  final isOld = log['isOld'] == 'true';
+                  final color = isOld ? Colors.grey[600] : Colors.greenAccent;
+                  
                   return Padding(
                     padding: const EdgeInsets.symmetric(vertical: 2.0),
                     child: Row(
@@ -342,7 +316,7 @@ class _GitTabState extends State<GitTab> {
                         Expanded(
                           child: Text(
                             log['message']!,
-                            style: const TextStyle(color: Colors.greenAccent, fontFamily: 'monospace', fontSize: 13),
+                            style: TextStyle(color: color, fontFamily: 'monospace', fontSize: 13),
                           ),
                         ),
                       ],
@@ -367,6 +341,134 @@ class _GitTabState extends State<GitTab> {
         foregroundColor: Colors.white,
         disabledBackgroundColor: color.withOpacity(0.3),
         shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+      ),
+    );
+  }
+}
+
+class _BranchListDialog extends StatefulWidget {
+  final List<Map<String, String>> branches;
+  final String defaultBranch;
+  final String currentBranch;
+  final Map<String, String> localRefs;
+  final String repoUrl;
+  final Function(String) onSelect;
+
+  const _BranchListDialog({
+    required this.branches,
+    required this.defaultBranch,
+    required this.currentBranch,
+    required this.localRefs,
+    required this.repoUrl,
+    required this.onSelect,
+  });
+
+  @override
+  State<_BranchListDialog> createState() => _BranchListDialogState();
+}
+
+class _BranchListDialogState extends State<_BranchListDialog> {
+  final ScrollController _scrollController = ScrollController();
+
+  @override
+  void initState() {
+    super.initState();
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      final index = widget.branches.indexWhere((b) => b['name'] == widget.currentBranch);
+      if (index != -1 && _scrollController.hasClients) {
+        // Estimate item height ~72.0
+        final offset = index * 72.0;
+        // Clamp offset to maxScrollExtent
+        final maxScroll = _scrollController.position.maxScrollExtent;
+        _scrollController.jumpTo(offset.clamp(0.0, maxScroll));
+      }
+    });
+  }
+
+  @override
+  void dispose() {
+    _scrollController.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return AlertDialog(
+      title: const Text("브랜치 선택"),
+      content: SizedBox(
+        width: double.maxFinite,
+        child: ListView.builder(
+          controller: _scrollController,
+          shrinkWrap: true,
+          itemCount: widget.branches.length,
+          itemBuilder: (ctx, index) {
+            final branch = widget.branches[index];
+            final name = branch['name']!;
+            final date = branch['date']!;
+            final hash = branch['hash']!;
+            final isDefault = name == widget.defaultBranch;
+            final isCurrent = name == widget.currentBranch;
+            
+            bool hasUpdate = false;
+            if (widget.localRefs.containsKey(name)) {
+              if (widget.localRefs[name] != hash) {
+                hasUpdate = true;
+              }
+            }
+
+            return ListTile(
+              tileColor: isCurrent ? Theme.of(context).colorScheme.secondaryContainer : null,
+              title: Row(
+                children: [
+                  Text(name, style: TextStyle(fontWeight: isDefault ? FontWeight.bold : FontWeight.normal)),
+                  if (isDefault) ...[
+                    const SizedBox(width: 8),
+                    Container(
+                      padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                      decoration: BoxDecoration(
+                        color: Colors.blue.withOpacity(0.2),
+                        borderRadius: BorderRadius.circular(4),
+                      ),
+                      child: const Text("Default", style: TextStyle(fontSize: 10, color: Colors.blue)),
+                    ),
+                  ],
+                  if (isCurrent) ...[
+                    const SizedBox(width: 8),
+                    const Icon(Icons.check, size: 16, color: Colors.green),
+                  ],
+                ],
+              ),
+              subtitle: Text(date, style: const TextStyle(fontSize: 12, color: Colors.grey)),
+              trailing: hasUpdate 
+                ? IconButton(
+                    icon: const Icon(Icons.priority_high, color: Colors.red, size: 20),
+                    tooltip: "업데이트 가능",
+                    onPressed: () async {
+                        if (widget.repoUrl.isNotEmpty) {
+                          final url = "${widget.repoUrl}/commits/$name";
+                          final uri = Uri.parse(url);
+                          if (await canLaunchUrl(uri)) {
+                            await launchUrl(uri, mode: LaunchMode.externalApplication);
+                          } else {
+                            if (context.mounted) {
+                              showDialog(
+                                context: context,
+                                builder: (_) => AlertDialog(
+                                  title: const Text("커밋 내역"),
+                                  content: SelectableText(url),
+                                  actions: [TextButton(onPressed: () => Navigator.pop(context), child: const Text("닫기"))],
+                                ),
+                              );
+                            }
+                          }
+                        }
+                    },
+                  ) 
+                : null,
+              onTap: () => widget.onSelect(name),
+            );
+          },
+        ),
       ),
     );
   }

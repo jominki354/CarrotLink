@@ -3,8 +3,33 @@ import 'package:provider/provider.dart';
 import '../../services/ssh_service.dart';
 import '../../services/macro_service.dart';
 
-class MacroTab extends StatelessWidget {
+class MacroTab extends StatefulWidget {
   const MacroTab({super.key});
+
+  @override
+  State<MacroTab> createState() => _MacroTabState();
+}
+
+class _MacroTabState extends State<MacroTab> {
+  @override
+  void initState() {
+    super.initState();
+    // Ensure macros are loaded. If empty, try reloading (though service usually handles it).
+    // We can force a notify if needed, but let's just rely on Provider.
+    // If the list is empty, it might be because it hasn't loaded yet.
+    // We can try to trigger a reload if it's empty.
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      final service = Provider.of<MacroService>(context, listen: false);
+      if (service.macros.isEmpty) {
+        // There is no public reload method, but we can add one or just trust it loads.
+        // If it's empty, maybe it's really empty?
+        // But user said "first press empty... then shows".
+        // This implies a rebuild fixes it.
+        // setState here might help if it was a timing issue.
+        setState(() {});
+      }
+    });
+  }
 
   void _showAddDialog(BuildContext context, {int? index, String? initialName, String? initialCmd}) {
     final nameCtrl = TextEditingController(text: initialName);

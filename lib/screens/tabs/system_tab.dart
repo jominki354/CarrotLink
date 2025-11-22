@@ -47,7 +47,7 @@ class _SystemTabState extends State<SystemTab> {
             context, 
             "Soft Restart", 
             Icons.refresh, 
-            "pkill -f selfdrive.manager && python /data/openpilot/selfdrive/manager/manager.py &",
+            "pkill -f selfdrive.manager && python3 /data/openpilot/selfdrive/manager/manager.py &",
             "Restarting Openpilot UI...",
             Colors.orange,
           ),

@@ -1,16 +1,33 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:provider/provider.dart';
 import 'package:google_fonts/google_fonts.dart';
-import 'services/ssh_service.dart';
-import 'screens/connection_screen.dart';
-import 'services/macro_service.dart';
+import 'package:intl/date_symbol_data_local.dart';
 
-void main() {
+import 'services/ssh_service.dart';
+import 'screens/splash_screen.dart';
+import 'services/macro_service.dart';
+import 'services/google_drive_service.dart';
+import 'services/backup_service.dart';
+import 'services/background_service.dart';
+
+void main() async {
+  WidgetsFlutterBinding.ensureInitialized();
+  await initializeDateFormatting('ko_KR', null);
+  initializeService(); // Don't await to prevent app freeze on startup
+  
+  // Lock orientation to portrait up
+  await SystemChrome.setPreferredOrientations([
+    DeviceOrientation.portraitUp,
+  ]);
+
   runApp(
     MultiProvider(
       providers: [
         ChangeNotifierProvider(create: (_) => SSHService()),
         ChangeNotifierProvider(create: (_) => MacroService()),
+        ChangeNotifierProvider(create: (_) => GoogleDriveService()),
+        ChangeNotifierProvider(create: (_) => BackupService()),
       ],
       child: const CarrotLinkApp(),
     ),
@@ -82,7 +99,7 @@ class CarrotLinkApp extends StatelessWidget {
           }),
         ),
       ),
-      home: const ConnectionScreen(),
+      home: const SplashScreen(),
     );
   }
 }

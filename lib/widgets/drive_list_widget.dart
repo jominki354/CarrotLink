@@ -16,17 +16,28 @@ class DriveListWidget extends StatefulWidget {
 class _DriveListWidgetState extends State<DriveListWidget> {
   List<String> _routes = [];
   bool _isLoading = false;
+  bool _isInit = true;
 
   @override
-  void initState() {
-    super.initState();
-    _loadRoutes();
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    if (_isInit) {
+      final ssh = Provider.of<SSHService>(context);
+      if (ssh.isConnected) {
+        _loadRoutes();
+        _isInit = false; // Only load once automatically when connected
+      }
+    }
   }
 
   Future<void> _loadRoutes() async {
-    setState(() => _isLoading = true);
     final ssh = Provider.of<SSHService>(context, listen: false);
+    if (!ssh.isConnected) return;
+
+    setState(() => _isLoading = true);
     try {
+      // Add a small delay to ensure SFTP is ready
+      await Future.delayed(const Duration(milliseconds: 500));
       final files = await ssh.listFiles('/data/media/0/realdata');
       // Group by route name (remove --segment)
       // Example: 2023-10-27--12-34-56--0 -> 2023-10-27--12-34-56
@@ -110,7 +121,7 @@ class _RouteCardState extends State<RouteCard> {
 
   Future<void> _loadPreview() async {
     if (_loadingImage) return;
-    setState(() => _loadingImage = true);
+    if (mounted) setState(() => _loadingImage = true);
 
     final ssh = Provider.of<SSHService>(context, listen: false);
     try {
@@ -121,53 +132,22 @@ class _RouteCardState extends State<RouteCard> {
       if (await file.exists()) {
         if (mounted) setState(() => _previewImage = file);
       } else {
-        // Check if preview.gif exists on device, if not generate it
-        // Fleet Manager path: /data/media/0/realdata/<route>--0/preview.gif
-        // But wait, realdata structure is <route> (folder) ? No.
-        // Fleet Manager: Paths.log_root() + route + "--0/preview.gif"
-        // log_root is /data/media/0/realdata
-        // So path is /data/media/0/realdata/<route>--0/preview.gif?
-        // Let's check listFiles output.
-        // In _loadRoutes, we listed /data/media/0/realdata and got "2023-..."
-        // Actually, openpilot structure is /data/media/0/realdata/2023-10-27--12-34-56--0/
-        // The folder name INCLUDES the segment number?
-        // Let's re-read helpers.py: segment_to_segment_name joins data_dir + segment.
-        // listdir_by_creation(Paths.log_root()) returns "2023-10-27--12-34-56--0", "2023-10-27--12-34-56--1" etc.
-        // Fleet Manager groups them by route name (removing --N).
-        
-        // My _loadRoutes logic was: listFiles('/data/media/0/realdata').
-        // If the folders are "route--segment", I need to group them.
-        // But wait, in my previous code I assumed "driveName" was the folder.
-        // Let's check what I did before.
-        // "final drives = files.where((f) => f.attr.isDirectory && f.filename.contains('--')).toList()"
-        // If the folders are "2023...--0", "2023...--1", then I was listing segments as drives?
-        // If so, I need to group them.
-        
-        // However, standard openpilot structure:
-        // /data/media/0/realdata/
-        //    2023-10-27--12-34-56--0/
-        //    2023-10-27--12-34-56--1/
-        
-        // Fleet Manager's all_routes() does this grouping.
-        // I should do the same.
-        
-        // But for now, let's assume the route passed here is "2023-10-27--12-34-56".
-        // The preview gif should be in "2023-10-27--12-34-56--0/preview.gif".
-        
+        // Only load if connected
+        if (!ssh.isConnected) return;
+
         final remoteDir = '/data/media/0/realdata/${widget.route}--0';
         final remoteGif = '$remoteDir/preview.gif';
         final remoteVideo = '$remoteDir/qcamera.ts';
 
-        // Check if gif exists
+        // Check if gif exists remotely
         final existsCmd = 'test -f $remoteGif && echo "yes" || echo "no"';
         final exists = (await ssh.executeCommand(existsCmd)).trim() == "yes";
 
         if (!exists) {
-          // Generate GIF
-          // ffmpeg -y -i input -ss 5 -vframes 1 output
-          // We need to make sure ffmpeg is available or use the one in /usr/bin/ffmpeg or similar.
-          // Fleet Manager uses 'ffmpeg'.
-          final genCmd = 'ffmpeg -y -i $remoteVideo -ss 5 -vframes 1 $remoteGif';
+          // Generate GIF - use -t 1 for faster generation (1 second only)
+          final genCmd = 'ffmpeg -y -i $remoteVideo -ss 5 -t 1 -vf scale=320:-1 -r 10 $remoteGif';
+          // Run in background or wait? Waiting might block if many items load at once.
+          // But we are in async function.
           await ssh.executeCommand(genCmd);
         }
 
@@ -200,8 +180,14 @@ class _RouteCardState extends State<RouteCard> {
                   ? Image.file(_previewImage!, fit: BoxFit.cover)
                   : Container(
                       color: Colors.black12,
-                      child: const Center(
-                        child: Icon(Icons.movie, size: 50, color: Colors.grey),
+                      child: Center(
+                        child: _loadingImage
+                            ? const SizedBox(
+                                width: 24, 
+                                height: 24, 
+                                child: CircularProgressIndicator(strokeWidth: 2)
+                              )
+                            : const Icon(Icons.movie, size: 50, color: Colors.grey),
                       ),
                     ),
             ),
@@ -233,6 +219,122 @@ class _RouteCardState extends State<RouteCard> {
   }
 }
 
+class SegmentTile extends StatefulWidget {
+  final String route;
+  final String segment;
+  final VoidCallback onTap;
+
+  const SegmentTile({
+    super.key,
+    required this.route,
+    required this.segment,
+    required this.onTap,
+  });
+
+  @override
+  State<SegmentTile> createState() => _SegmentTileState();
+}
+
+class _SegmentTileState extends State<SegmentTile> {
+  File? _thumbnail;
+  bool _loading = false;
+  
+  // Static queue to limit concurrent ffmpeg processes
+  static int _activeGenerations = 0;
+  static final List<Function> _taskQueue = [];
+
+  @override
+  void initState() {
+    super.initState();
+    _loadThumbnail();
+  }
+
+  Future<void> _loadThumbnail() async {
+    if (_loading) return;
+    if (mounted) setState(() => _loading = true);
+
+    final ssh = Provider.of<SSHService>(context, listen: false);
+    try {
+      final tempDir = await getTemporaryDirectory();
+      final localPath = '${tempDir.path}/${widget.route}--${widget.segment}.jpg';
+      final file = File(localPath);
+
+      if (await file.exists()) {
+        if (mounted) setState(() => _thumbnail = file);
+      } else {
+        if (!ssh.isConnected) return;
+
+        // Enqueue remote generation
+        _enqueueTask(() async {
+          if (!mounted) return;
+          
+          final segmentIndex = widget.segment.split('--').last;
+          final remoteDir = '/data/media/0/realdata/${widget.route}--$segmentIndex';
+          final remoteImg = '$remoteDir/thumbnail.jpg';
+          final remoteVideo = '$remoteDir/qcamera.ts';
+
+          // Check if thumbnail exists remotely
+          final existsCmd = 'test -f $remoteImg && echo "yes" || echo "no"';
+          final exists = (await ssh.executeCommand(existsCmd)).trim() == "yes";
+
+          if (!exists) {
+            // Generate thumbnail
+            final genCmd = 'ffmpeg -y -i $remoteVideo -ss 5 -vframes 1 -vf scale=160:-1 $remoteImg';
+            await ssh.executeCommand(genCmd);
+          }
+
+          final content = await ssh.readBinaryFile(remoteImg);
+          await file.writeAsBytes(content);
+          if (mounted) setState(() => _thumbnail = file);
+        });
+      }
+    } catch (e) {
+      // Ignore errors
+    } finally {
+      if (mounted && _thumbnail != null) setState(() => _loading = false);
+      // If failed, keep loading false but no image
+      if (mounted && _thumbnail == null) setState(() => _loading = false);
+    }
+  }
+
+  void _enqueueTask(Future<void> Function() task) {
+    if (_activeGenerations < 2) { // Max 2 concurrent tasks
+      _activeGenerations++;
+      task().then((_) => _processNext()).catchError((_) => _processNext());
+    } else {
+      _taskQueue.add(task);
+    }
+  }
+
+  static void _processNext() {
+    _activeGenerations--;
+    if (_taskQueue.isNotEmpty) {
+      _activeGenerations++;
+      final nextTask = _taskQueue.removeAt(0);
+      nextTask().then((_) => _processNext()).catchError((_) => _processNext());
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return ListTile(
+      leading: Container(
+        width: 80,
+        height: 45,
+        color: Colors.black12,
+        child: _thumbnail != null
+            ? Image.file(_thumbnail!, fit: BoxFit.cover)
+            : (_loading
+                ? const Center(child: SizedBox(width: 16, height: 16, child: CircularProgressIndicator(strokeWidth: 2)))
+                : const Icon(Icons.play_circle_outline)),
+      ),
+      title: Text(widget.segment),
+      trailing: const Icon(Icons.open_in_browser),
+      onTap: widget.onTap,
+    );
+  }
+}
+
 class RouteDetailScreen extends StatefulWidget {
   final String route;
   const RouteDetailScreen({super.key, required this.route});
@@ -258,9 +360,9 @@ class _RouteDetailScreenState extends State<RouteDetailScreen> {
       final files = await ssh.listFiles('/data/media/0/realdata');
       final segments = files
           .where((f) => f.attr.isDirectory && f.filename.startsWith('${widget.route}--'))
-          .map((f) => f.filename.split('--').last) // Get segment number
+          .map((f) => f.filename) // Keep full filename
           .toList()
-        ..sort((a, b) => int.parse(a).compareTo(int.parse(b)));
+        ..sort((a, b) => a.compareTo(b));
 
       if (mounted) {
         setState(() {
@@ -275,11 +377,14 @@ class _RouteDetailScreenState extends State<RouteDetailScreen> {
     }
   }
 
-  Future<void> _playInBrowser(String segment) async {
+  Future<void> _playInBrowser(String segmentFilename) async {
     final ssh = Provider.of<SSHService>(context, listen: false);
     final ip = ssh.connectedIp ?? '192.168.0.1';
     
-    final url = Uri.parse('http://$ip:8082/footage/${widget.route}?$segment,qcamera');
+    // Extract segment number from filename: route--N
+    final segmentIndex = segmentFilename.split('--').last;
+    
+    final url = Uri.parse('http://$ip:8082/footage/${widget.route}?$segmentIndex,qcamera');
     
     if (await canLaunchUrl(url)) {
       await launchUrl(url, mode: LaunchMode.externalApplication);
@@ -302,10 +407,9 @@ class _RouteDetailScreenState extends State<RouteDetailScreen> {
               itemCount: _segments.length,
               itemBuilder: (context, index) {
                 final segment = _segments[index];
-                return ListTile(
-                  leading: const Icon(Icons.play_circle_outline),
-                  title: Text("Segment $segment"),
-                  trailing: const Icon(Icons.open_in_browser),
+                return SegmentTile(
+                  route: widget.route,
+                  segment: segment,
                   onTap: () => _playInBrowser(segment),
                 );
               },
