@@ -173,7 +173,11 @@ class _HomeTabState extends State<HomeTab> {
                             ),
                             const SizedBox(height: 4),
                             Text(
-                              ssh.connectionStatus,
+                              ssh.isConnected 
+                                  ? "연결됨" 
+                                  : (ssh.connectionStatus.startsWith("Connecting") 
+                                      ? "연결 중..." 
+                                      : (ssh.connectionStatus.contains("Error") ? "연결 실패" : "연결 안 됨")),
                               style: Theme.of(context).textTheme.bodySmall?.copyWith(
                                 color: ssh.isConnected 
                                     ? Colors.green 
@@ -192,15 +196,15 @@ class _HomeTabState extends State<HomeTab> {
                   // Info Grid
                   Row(
                     children: [
-                      Expanded(child: _buildInfoItem(Icons.call_split, "브랜치", _branch)),
-                      Expanded(child: _buildInfoItem(Icons.commit, "커밋", _commit)),
+                      Expanded(child: _buildInfoItem(Icons.call_split, "브랜치", ssh.isConnected ? _branch : "연결 안 됨")),
+                      Expanded(child: _buildInfoItem(Icons.commit, "커밋", ssh.isConnected ? _commit : "연결 안 됨")),
                     ],
                   ),
                   const SizedBox(height: 16),
                   Row(
                     children: [
-                      Expanded(child: _buildInfoItem(Icons.fingerprint, "Dongle ID", _dongleId)),
-                      Expanded(child: _buildInfoItem(Icons.qr_code, "Serial", _serial)),
+                      Expanded(child: _buildInfoItem(Icons.fingerprint, "Dongle ID", ssh.isConnected ? _dongleId : "연결 안 됨")),
+                      Expanded(child: _buildInfoItem(Icons.qr_code, "Serial", ssh.isConnected ? _serial : "연결 안 됨")),
                     ],
                   ),
                 ],

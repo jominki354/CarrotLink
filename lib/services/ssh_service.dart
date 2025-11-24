@@ -461,15 +461,16 @@ class SSHService extends ChangeNotifier {
 
           final prefix = "${parts[0]}.${parts[1]}.${parts[2]}";
           
-          // Scan 1-254 in parallel
-          final futures = <Future>[];
-          for (int i = 1; i < 255; i++) {
-            final targetIp = "$prefix.$i";
-            if (targetIp == ip) continue; // Skip self
-
-            futures.add(_checkPort(targetIp, 22));
+          // Scan 1-254 in batches to avoid FD limits
+          for (int i = 1; i < 255; i += 20) {
+            final futures = <Future>[];
+            for (int j = 0; j < 20 && (i + j) < 255; j++) {
+              final targetIp = "$prefix.${i + j}";
+              if (targetIp == ip) continue; // Skip self
+              futures.add(_checkPort(targetIp, 22));
+            }
+            await Future.wait(futures);
           }
-          await Future.wait(futures);
         }
       }
     } catch (e) {

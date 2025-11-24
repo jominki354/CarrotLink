@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
+import 'package:flutter/services.dart'; // Added for Clipboard
 import 'package:http/http.dart' as http;
 import 'package:package_info_plus/package_info_plus.dart';
 import 'package:open_filex/open_filex.dart';
@@ -14,6 +15,7 @@ import '../services/ssh_service.dart';
 import '../services/backup_service.dart';
 import '../services/google_drive_service.dart';
 import '../services/update_service.dart';
+import '../services/github_service.dart';
 import '../widgets/custom_toast.dart';
 import 'permission_screen.dart';
 
@@ -38,6 +40,13 @@ class SettingsScreen extends StatelessWidget {
             title: const Text('백업'),
             trailing: const Icon(Icons.chevron_right),
             onTap: () => Navigator.push(context, MaterialPageRoute(builder: (_) => const BackupSettingsScreen())),
+          ),
+          const Divider(),
+          ListTile(
+            leading: const Icon(Icons.share),
+            title: const Text('공유'),
+            trailing: const Icon(Icons.chevron_right),
+            onTap: () => Navigator.push(context, MaterialPageRoute(builder: (_) => const ShareSettingsScreen())),
           ),
           const Divider(),
           ListTile(
@@ -145,14 +154,244 @@ class _ConnectionSettingsScreenState extends State<ConnectionSettingsScreen> {
   final TextEditingController _keyController = TextEditingController();
   final TextEditingController _passwordController = TextEditingController(text: 'comma');
   final FlutterSecureStorage _storage = const FlutterSecureStorage();
+  final GitHubService _githubService = GitHubService();
   bool _useKey = false;
+  bool _isGitHubLoggedIn = false;
   StreamSubscription? _discoverySubscription;
 
   @override
   void initState() {
     super.initState();
     _loadSettings();
+    _checkGitHubLogin();
     _startDiscovery();
+  }
+
+  Future<void> _checkGitHubLogin() async {
+    final loggedIn = await _githubService.isLoggedIn();
+    if (mounted) setState(() => _isGitHubLoggedIn = loggedIn);
+  }
+
+  Future<void> _loginToGitHub() async {
+    await showDialog(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text("GitHub 로그인 방식 선택"),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            ListTile(
+              leading: const Icon(Icons.touch_app),
+              title: const Text("간편 로그인 (권장)"),
+              subtitle: const Text("브라우저 인증 (Device Flow)"),
+              onTap: () {
+                Navigator.pop(context);
+                _startDeviceFlow();
+              },
+            ),
+            const Divider(),
+            ListTile(
+              leading: const Icon(Icons.vpn_key),
+              title: const Text("토큰 직접 입력"),
+              subtitle: const Text("Personal Access Token (PAT)"),
+              onTap: () {
+                Navigator.pop(context);
+                _showPatDialog();
+              },
+            ),
+          ],
+        ),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(context), child: const Text("취소")),
+        ],
+      ),
+    );
+  }
+
+  Future<void> _showPatDialog() async {
+    final tokenController = TextEditingController();
+    await showDialog(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text("토큰 직접 입력"),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            const Text("GitHub Personal Access Token (PAT)을 입력하세요.\n필수 권한: admin:public_key"),
+            const SizedBox(height: 10),
+            TextField(
+              controller: tokenController,
+              decoration: const InputDecoration(
+                labelText: "Token",
+                border: OutlineInputBorder(),
+              ),
+            ),
+            const SizedBox(height: 10),
+            TextButton(
+              onPressed: () => launchUrl(Uri.parse("https://github.com/settings/tokens/new?scopes=admin:public_key&description=CarrotLink")),
+              child: const Text("토큰 생성 페이지 열기"),
+            ),
+          ],
+        ),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(context), child: const Text("취소")),
+          FilledButton(
+            onPressed: () async {
+              if (tokenController.text.isNotEmpty) {
+                await _githubService.saveToken(tokenController.text.trim());
+                await _checkGitHubLogin();
+                if (mounted) {
+                  Navigator.pop(context);
+                  CustomToast.show(context, "GitHub 로그인 성공");
+                }
+              }
+            },
+            child: const Text("로그인"),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Future<void> _startDeviceFlow() async {
+    try {
+      final deviceData = await _githubService.initiateDeviceFlow();
+      final userCode = deviceData['user_code'];
+      final verificationUri = deviceData['verification_uri'];
+      final deviceCode = deviceData['device_code'];
+      final interval = deviceData['interval'];
+
+      if (!mounted) return;
+
+      bool polling = true;
+
+      // Start polling in background
+      _pollToken(deviceCode, interval, () => polling, (token) async {
+        if (token != null) {
+          await _githubService.saveToken(token);
+          await _checkGitHubLogin();
+          if (mounted && polling) {
+            Navigator.pop(context); // Close dialog
+            CustomToast.show(context, "GitHub 로그인 성공");
+          }
+        }
+      }, (error) {
+        if (mounted && polling) {
+           Navigator.pop(context);
+           CustomToast.show(context, error, isError: true);
+        }
+      });
+
+      await showDialog(
+        context: context,
+        barrierDismissible: false,
+        builder: (context) => AlertDialog(
+          title: const Text("GitHub 간편 로그인"),
+          content: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              const Text("1. 아래 코드를 복사하세요."),
+              const SizedBox(height: 10),
+              Container(
+                padding: const EdgeInsets.all(12),
+                decoration: BoxDecoration(
+                  color: Colors.grey[800],
+                  borderRadius: BorderRadius.circular(8),
+                ),
+                child: SelectableText(
+                  userCode,
+                  style: const TextStyle(fontSize: 24, fontWeight: FontWeight.bold, letterSpacing: 2, color: Colors.white),
+                ),
+              ),
+              const SizedBox(height: 10),
+              ElevatedButton.icon(
+                onPressed: () {
+                  Clipboard.setData(ClipboardData(text: userCode));
+                  CustomToast.show(context, "코드가 복사되었습니다.");
+                },
+                icon: const Icon(Icons.copy),
+                label: const Text("코드 복사"),
+              ),
+              const SizedBox(height: 20),
+              const Text("2. 인증 페이지를 열고 코드를 입력하세요."),
+              const SizedBox(height: 10),
+              FilledButton(
+                onPressed: () => launchUrl(Uri.parse(verificationUri)),
+                child: const Text("인증 페이지 열기"),
+              ),
+              const SizedBox(height: 20),
+              const LinearProgressIndicator(),
+              const SizedBox(height: 5),
+              const Text("인증 대기 중...", style: TextStyle(fontSize: 12, color: Colors.grey)),
+            ],
+          ),
+          actions: [
+            TextButton(
+              onPressed: () {
+                polling = false;
+                Navigator.pop(context);
+              },
+              child: const Text("취소"),
+            ),
+          ],
+        ),
+      );
+      
+      polling = false; // Stop polling when dialog closes
+      
+    } catch (e) {
+      if (mounted) CustomToast.show(context, "로그인 시작 실패: $e", isError: true);
+    }
+  }
+
+  Future<void> _pollToken(String deviceCode, int interval, bool Function() isPolling, Function(String?) onSuccess, Function(String) onError) async {
+    while (isPolling()) {
+      await Future.delayed(Duration(seconds: interval + 1));
+      if (!isPolling()) break;
+
+      try {
+        final token = await _githubService.pollForToken(deviceCode);
+        if (token != null) {
+          onSuccess(token);
+          break;
+        }
+      } catch (e) {
+        if (e.toString().contains('slow_down')) {
+          interval += 5;
+        } else if (e.toString().contains('expired_token')) {
+          onError("인증 시간이 만료되었습니다.");
+          break;
+        } else if (e.toString().contains('access_denied')) {
+          onError("인증이 거부되었습니다.");
+          break;
+        }
+        // authorization_pending: continue
+      }
+    }
+  }
+
+  Future<void> _generateAndRegisterKey() async {
+    try {
+      CustomToast.show(context, "키 생성 중... (시간이 걸릴 수 있습니다)");
+      // Delay to show toast
+      await Future.delayed(const Duration(milliseconds: 100));
+      
+      final keyPair = await _githubService.generateRSAKeyPair();
+      
+      if (mounted) CustomToast.show(context, "GitHub에 등록 중...");
+      final title = "CarrotLink Key ${DateTime.now().millisecondsSinceEpoch}";
+      await _githubService.uploadPublicKey(title, keyPair['public']!);
+      
+      if (mounted) {
+        setState(() {
+          _keyController.text = keyPair['private']!;
+          _useKey = true;
+        });
+        CustomToast.show(context, "키 생성 및 등록 완료!");
+      }
+    } catch (e) {
+      if (mounted) CustomToast.show(context, "오류: $e", isError: true);
+    }
   }
 
   void _startDiscovery() {
@@ -290,6 +529,52 @@ class _ConnectionSettingsScreenState extends State<ConnectionSettingsScreen> {
               ),
             ],
           ),
+          const SizedBox(height: 24),
+          const Divider(),
+          const SizedBox(height: 16),
+          Text("GitHub 연동 (SSH 키 관리)", style: Theme.of(context).textTheme.titleMedium),
+          const SizedBox(height: 10),
+          if (!_isGitHubLoggedIn)
+            ElevatedButton.icon(
+              onPressed: _loginToGitHub,
+              icon: const Icon(Icons.login),
+              label: const Text("GitHub 로그인 (PAT)"),
+              style: ElevatedButton.styleFrom(backgroundColor: Colors.black87, foregroundColor: Colors.white),
+            )
+          else
+            Column(
+              children: [
+                Row(
+                  children: [
+                    const Icon(Icons.check_circle, color: Colors.green),
+                    const SizedBox(width: 8),
+                    const Text("GitHub 로그인됨"),
+                    const Spacer(),
+                    TextButton(
+                      onPressed: () async {
+                        await _githubService.clearToken();
+                        await _checkGitHubLogin();
+                      },
+                      child: const Text("로그아웃"),
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 8),
+                SizedBox(
+                  width: double.infinity,
+                  child: FilledButton.icon(
+                    onPressed: _generateAndRegisterKey,
+                    icon: const Icon(Icons.vpn_key),
+                    label: const Text("새 SSH 키 생성 및 GitHub 등록"),
+                  ),
+                ),
+                const SizedBox(height: 4),
+                const Text(
+                  "새로운 RSA 키 쌍을 생성하고 공개키를 GitHub 계정에 자동으로 등록합니다. 개인키는 위 입력창에 자동 입력됩니다.",
+                  style: TextStyle(fontSize: 11, color: Colors.grey),
+                ),
+              ],
+            ),
         ],
       ),
     );
@@ -474,6 +759,55 @@ class UpdateDialog extends StatelessWidget {
           ),
         ),
       ],
+    );
+  }
+}
+
+class ShareSettingsScreen extends StatefulWidget {
+  const ShareSettingsScreen({super.key});
+
+  @override
+  State<ShareSettingsScreen> createState() => _ShareSettingsScreenState();
+}
+
+class _ShareSettingsScreenState extends State<ShareSettingsScreen> {
+  bool _convertToMp4 = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _loadSettings();
+  }
+
+  Future<void> _loadSettings() async {
+    final prefs = await SharedPreferences.getInstance();
+    setState(() {
+      _convertToMp4 = prefs.getBool('share_convert_mp4') ?? false;
+    });
+  }
+
+  Future<void> _toggleConvert(bool value) async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setBool('share_convert_mp4', value);
+    setState(() {
+      _convertToMp4 = value;
+    });
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      appBar: AppBar(title: const Text('공유 설정')),
+      body: ListView(
+        children: [
+          SwitchListTile(
+            title: const Text('MP4로 변환하여 공유'),
+            subtitle: const Text('공유 시 .ts 파일을 .mp4로 변환합니다. (시간이 더 소요될 수 있습니다)'),
+            value: _convertToMp4,
+            onChanged: _toggleConvert,
+          ),
+        ],
+      ),
     );
   }
 }

@@ -23,6 +23,7 @@ class AppTheme {
         backgroundColor: carrotOrange,
         foregroundColor: Colors.white,
         centerTitle: true,
+        scrolledUnderElevation: 0,
       ),
       elevatedButtonTheme: ElevatedButtonThemeData(
         style: ElevatedButton.styleFrom(
@@ -55,6 +56,7 @@ class AppTheme {
         backgroundColor: darkBackground,
         foregroundColor: carrotOrange,
         centerTitle: true,
+        scrolledUnderElevation: 0,
       ),
       elevatedButtonTheme: ElevatedButtonThemeData(
         style: ElevatedButton.styleFrom(

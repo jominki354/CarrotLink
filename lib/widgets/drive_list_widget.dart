@@ -4,9 +4,12 @@ import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:url_launcher/url_launcher.dart';
+import 'package:share_plus/share_plus.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 import '../services/ssh_service.dart';
 import 'package:dartssh2/dartssh2.dart';
 import 'design_components.dart';
+import 'custom_toast.dart';
 
 class DriveListWidget extends StatefulWidget {
   const DriveListWidget({super.key});
@@ -118,7 +121,11 @@ class _DriveListWidgetState extends State<DriveListWidget> {
           final route = _routes[index];
           return SizedBox(
             width: 200, // Fixed width for horizontal items
-            child: RouteCard(route: route, onTap: () => _openRoute(route)),
+            child: RouteCard(
+              route: route, 
+              index: index,
+              onTap: () => _openRoute(route)
+            ),
           );
         },
       ),
@@ -128,9 +135,15 @@ class _DriveListWidgetState extends State<DriveListWidget> {
 
 class RouteCard extends StatefulWidget {
   final String route;
+  final int index;
   final VoidCallback onTap;
 
-  const RouteCard({super.key, required this.route, required this.onTap});
+  const RouteCard({
+    super.key, 
+    required this.route, 
+    required this.index,
+    required this.onTap
+  });
 
   @override
   State<RouteCard> createState() => _RouteCardState();
@@ -190,6 +203,12 @@ class _RouteCardState extends State<RouteCard> {
     }
   }
 
+  String _formatRouteName(String route) {
+    // Example: 00000001-8b... -> 001-8b...
+    // Removes leading zeros but keeps at least 3 digits if it starts with numbers
+    return route.replaceFirst(RegExp(r'^0+(?=\d{3})'), '');
+  }
+
   @override
   Widget build(BuildContext context) {
     return Padding(
@@ -224,7 +243,7 @@ class _RouteCardState extends State<RouteCard> {
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
                   Text(
-                    widget.route,
+                    _formatRouteName(widget.route),
                     style: Theme.of(context).textTheme.titleMedium?.copyWith(
                           fontWeight: FontWeight.bold,
                         ),
@@ -233,7 +252,7 @@ class _RouteCardState extends State<RouteCard> {
                   ),
                   const SizedBox(height: 4),
                   Text(
-                    "Tap to view segments",
+                    "자세히 보기",
                     style: Theme.of(context).textTheme.bodySmall,
                   ),
                 ],
@@ -249,12 +268,14 @@ class _RouteCardState extends State<RouteCard> {
 class SegmentTile extends StatefulWidget {
   final String route;
   final String segment;
+  final int index;
   final VoidCallback onTap;
 
   const SegmentTile({
     super.key,
     required this.route,
     required this.segment,
+    required this.index,
     required this.onTap,
   });
 
@@ -265,6 +286,7 @@ class SegmentTile extends StatefulWidget {
 class _SegmentTileState extends State<SegmentTile> {
   File? _thumbnail;
   bool _loading = false;
+  bool _sharing = false;
   
   // Static queue to limit concurrent ffmpeg processes
   static int _activeGenerations = 0;
@@ -275,6 +297,91 @@ class _SegmentTileState extends State<SegmentTile> {
     super.initState();
     _loadThumbnail();
   }
+
+  Future<void> _shareSegment() async {
+    if (_sharing) return;
+    setState(() => _sharing = true);
+
+    final ssh = Provider.of<SSHService>(context, listen: false);
+    try {
+      if (!ssh.isConnected) {
+        CustomToast.show(context, "연결이 필요합니다.", isError: true);
+        return;
+      }
+
+      final prefs = await SharedPreferences.getInstance();
+      final convertToMp4 = prefs.getBool('share_convert_mp4') ?? false;
+
+      if (mounted) {
+        CustomToast.show(context, convertToMp4 ? "MP4 변환 및 파일 준비 중..." : "파일 다운로드 및 준비 중...");
+      }
+
+      final tempDir = await getTemporaryDirectory();
+      final segmentIndex = widget.segment.split('--').last;
+      final remoteDir = '/data/media/0/realdata/${widget.route}--$segmentIndex';
+      
+      // Files to share
+      final filesToShare = <XFile>[];
+      final fileNames = ['qcamera.ts', 'rlog', 'qlog']; // Common files
+
+      for (final name in fileNames) {
+        var remotePath = '$remoteDir/$name';
+        var localFileName = '${widget.route}--$segmentIndex--$name';
+        
+        // Handle MP4 conversion for qcamera.ts
+        if (convertToMp4 && name == 'qcamera.ts') {
+          final mp4Name = 'qcamera.mp4';
+          final remoteMp4Path = '$remoteDir/$mp4Name';
+          localFileName = '${widget.route}--$segmentIndex--$mp4Name';
+          
+          // Check if mp4 already exists remotely
+          final existsMp4Cmd = 'test -f $remoteMp4Path && echo "yes" || echo "no"';
+          final existsMp4 = (await ssh.executeCommand(existsMp4Cmd)).trim() == "yes";
+          
+          if (!existsMp4) {
+             // CustomToast.show(context, "MP4 변환 중... (잠시만 기다려주세요)");
+             // Convert using ffmpeg. -c copy is fast if container change is enough.
+             // But qcamera.ts might need re-muxing. -c copy usually works for ts->mp4 if codecs are compatible.
+             // If not, we might need -c:v libx264 etc. but that's slow on device.
+             // Let's try -c copy first.
+             final convertCmd = 'ffmpeg -y -i $remotePath -c copy $remoteMp4Path';
+             await ssh.executeCommand(convertCmd);
+          }
+          
+          remotePath = remoteMp4Path;
+        }
+
+        final localPath = '${tempDir.path}/$localFileName';
+        final file = File(localPath);
+
+        // Check if remote file exists (or the converted one)
+        final existsCmd = 'test -f $remotePath && echo "yes" || echo "no"';
+        final exists = (await ssh.executeCommand(existsCmd)).trim() == "yes";
+
+        if (exists) {
+          // Download if not exists locally
+          if (!await file.exists()) {
+             // CustomToast.show(context, "${remotePath.split('/').last} 다운로드 중...");
+             final content = await ssh.readBinaryFile(remotePath);
+             await file.writeAsBytes(content);
+          }
+          filesToShare.add(XFile(localPath));
+        }
+      }
+
+      if (filesToShare.isNotEmpty) {
+        await Share.shareXFiles(filesToShare, text: "${widget.route} -- Segment ${widget.index}");
+      } else {
+        if (mounted) CustomToast.show(context, "공유할 파일이 없습니다.", isError: true);
+      }
+
+    } catch (e) {
+      if (mounted) CustomToast.show(context, "공유 실패: $e", isError: true);
+    } finally {
+      if (mounted) setState(() => _sharing = false);
+    }
+  }
+
 
   Future<void> _loadThumbnail() async {
     if (_loading) return;
@@ -355,8 +462,30 @@ class _SegmentTileState extends State<SegmentTile> {
                 ? const Center(child: SizedBox(width: 16, height: 16, child: CircularProgressIndicator(strokeWidth: 2)))
                 : const Icon(Icons.play_circle_outline)),
       ),
-      title: Text(widget.segment),
-      trailing: const Icon(Icons.open_in_browser),
+      title: Text(
+        widget.segment,
+        style: const TextStyle(fontSize: 14),
+        maxLines: 1,
+        overflow: TextOverflow.ellipsis,
+      ),
+      subtitle: Text(
+        widget.segment,
+        style: const TextStyle(fontSize: 10, color: Colors.grey),
+        maxLines: 1,
+        overflow: TextOverflow.ellipsis,
+      ),
+      trailing: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          IconButton(
+            icon: _sharing 
+                ? const SizedBox(width: 20, height: 20, child: CircularProgressIndicator(strokeWidth: 2))
+                : const Icon(Icons.share),
+            onPressed: _shareSegment,
+          ),
+          const Icon(Icons.open_in_browser),
+        ],
+      ),
       onTap: widget.onTap,
     );
   }
@@ -388,8 +517,14 @@ class _RouteDetailScreenState extends State<RouteDetailScreen> {
       final segments = files
           .where((f) => f.attr.isDirectory && f.filename.startsWith('${widget.route}--'))
           .map((f) => f.filename) // Keep full filename
-          .toList()
-        ..sort((a, b) => a.compareTo(b));
+          .toList();
+        
+      // Numerical sort
+      segments.sort((a, b) {
+        final indexA = int.tryParse(a.split('--').last) ?? 0;
+        final indexB = int.tryParse(b.split('--').last) ?? 0;
+        return indexA.compareTo(indexB);
+      });
 
       if (mounted) {
         setState(() {
@@ -437,6 +572,7 @@ class _RouteDetailScreenState extends State<RouteDetailScreen> {
                 return SegmentTile(
                   route: widget.route,
                   segment: segment,
+                  index: index + 1,
                   onTap: () => _playInBrowser(segment),
                 );
               },

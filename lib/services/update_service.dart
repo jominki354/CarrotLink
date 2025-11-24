@@ -95,7 +95,8 @@ class UpdateService extends ChangeNotifier {
 
       if (releaseData != null) {
         final String tagName = releaseData['tag_name'] ?? "";
-        final latestVersion = tagName.replaceAll('v', '');
+        // Remove 'v' prefix and build metadata (after +)
+        final latestVersion = tagName.replaceAll('v', '').split('+')[0];
         final currentVersionBase = _currentVersion.split('+')[0];
 
         // Compare versions

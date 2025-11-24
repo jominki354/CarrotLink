@@ -17,6 +17,49 @@ class FileEditorScreen extends StatefulWidget {
   State<FileEditorScreen> createState() => _FileEditorScreenState();
 }
 
+class _CodeEditorPainter extends CustomPainter {
+  final String text;
+  final TextStyle style;
+  final double fontSize;
+  final Color lineColor;
+
+  _CodeEditorPainter({
+    required this.text,
+    required this.style,
+    required this.fontSize,
+    required this.lineColor,
+  });
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final textPainter = TextPainter(
+      textDirection: TextDirection.ltr,
+    );
+
+    final lines = text.split('\n');
+    double y = 0;
+    final lineHeight = fontSize * 1.2; // Same as TextStyle height
+
+    // Paint line numbers and grid lines
+    final paint = Paint()
+      ..color = lineColor
+      ..strokeWidth = 1.0;
+
+    for (int i = 0; i < lines.length; i++) {
+      // Draw bottom line for each row
+      canvas.drawLine(
+        Offset(0, y + lineHeight),
+        Offset(size.width, y + lineHeight),
+        paint,
+      );
+      y += lineHeight;
+    }
+  }
+
+  @override
+  bool shouldRepaint(covariant CustomPainter oldDelegate) => true;
+}
+
 class _FileEditorScreenState extends State<FileEditorScreen> {
   late TextEditingController _controller;
   late FocusNode _focusNode;
@@ -26,6 +69,7 @@ class _FileEditorScreenState extends State<FileEditorScreen> {
   final TextEditingController _findController = TextEditingController();
   final TextEditingController _replaceController = TextEditingController();
   double _fontSize = 14.0;
+  final double _lineHeightMultiplier = 1.5; // Increased for better readability and touch targets
 
   @override
   void initState() {
@@ -304,17 +348,25 @@ class _FileEditorScreenState extends State<FileEditorScreen> {
                       color: Theme.of(context).colorScheme.surfaceContainer,
                       child: Column(
                         children: List.generate(lineCount, (index) {
-                          return SizedBox(
-                            height: _fontSize * 1.2, // Approximate height matching TextStyle height
+                          return Container(
+                            height: _fontSize * _lineHeightMultiplier,
+                            alignment: Alignment.centerRight,
+                            decoration: BoxDecoration(
+                              border: Border(
+                                bottom: BorderSide(
+                                  color: Colors.grey.withOpacity(0.1),
+                                  width: 1,
+                                ),
+                              ),
+                            ),
                             child: Text(
                               '${index + 1}',
                               style: TextStyle(
                                 fontFamily: 'monospace',
                                 fontSize: _fontSize,
                                 color: Colors.grey,
-                                height: 1.2,
+                                height: 1.0, // Reset height to center in container
                               ),
-                              textAlign: TextAlign.right,
                             ),
                           );
                         }),
@@ -324,20 +376,53 @@ class _FileEditorScreenState extends State<FileEditorScreen> {
                     Container(width: 1, color: Colors.grey.withOpacity(0.5)),
                     // Text Field
                     Expanded(
-                      child: TextField(
-                        controller: _controller,
-                        focusNode: _focusNode,
-                        maxLines: null, // Allow growing
-                        style: TextStyle(
-                          fontFamily: 'monospace',
-                          fontSize: _fontSize,
-                          color: Theme.of(context).textTheme.bodyLarge?.color,
-                          height: 1.2,
-                        ),
-                        decoration: const InputDecoration(
-                          contentPadding: EdgeInsets.all(16),
-                          border: InputBorder.none, // Remove border
-                          isDense: true,
+                      child: SingleChildScrollView(
+                        scrollDirection: Axis.horizontal,
+                        child: SizedBox(
+                          width: 10000, // Large width to prevent wrapping
+                          child: Stack(
+                            children: [
+                              // Grid Lines Background
+                              Positioned.fill(
+                                top: 16, // Match TextField padding
+                                child: Column(
+                                  crossAxisAlignment: CrossAxisAlignment.start,
+                                  children: List.generate(lineCount, (index) {
+                                    return Container(
+                                      height: _fontSize * _lineHeightMultiplier,
+                                      width: double.infinity,
+                                      decoration: BoxDecoration(
+                                        border: Border(
+                                          bottom: BorderSide(
+                                            color: Colors.grey.withOpacity(0.1),
+                                            width: 1,
+                                          ),
+                                        ),
+                                      ),
+                                    );
+                                  }),
+                                ),
+                              ),
+                              // Actual Text Field
+                              TextField(
+                                controller: _controller,
+                                focusNode: _focusNode,
+                                maxLines: null, // Allow growing
+                                keyboardType: TextInputType.multiline,
+                                style: TextStyle(
+                                  fontFamily: 'monospace',
+                                  fontSize: _fontSize,
+                                  color: Theme.of(context).textTheme.bodyLarge?.color,
+                                  height: _lineHeightMultiplier, // Match container height
+                                ),
+                                decoration: const InputDecoration(
+                                  contentPadding: EdgeInsets.all(16),
+                                  border: InputBorder.none, // Remove border
+                                  isDense: true,
+                                ),
+                              ),
+                            ],
+                          ),
                         ),
                       ),
                     ),
