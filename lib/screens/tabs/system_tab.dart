@@ -6,6 +6,8 @@ import '../../constants.dart';
 import '../../widgets/design_components.dart';
 import '../../widgets/custom_toast.dart';
 
+import '../../widgets/command_execution_dialog.dart';
+
 class SystemTab extends StatefulWidget {
   const SystemTab({super.key});
 
@@ -43,16 +45,15 @@ class _SystemTabState extends State<SystemTab> {
     );
 
     if (confirmed == true && mounted) {
-      try {
-        await ssh.executeCommand(command);
-        if (mounted) {
-          CustomToast.show(context, "명령어 전송 완료: $title");
-        }
-      } catch (e) {
-        if (mounted) {
-          CustomToast.show(context, "명령어 전송 실패: $e", isError: true);
-        }
-      }
+      showDialog(
+        context: context,
+        barrierDismissible: false,
+        builder: (context) => CommandExecutionDialog(
+          title: title,
+          command: command,
+          autoClose: false,
+        ),
+      );
     }
   }
 
