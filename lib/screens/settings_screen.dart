@@ -16,6 +16,9 @@ import '../services/backup_service.dart';
 import '../services/google_drive_service.dart';
 import '../services/update_service.dart';
 import '../services/github_service.dart';
+import '../services/ssh_key_helper.dart';
+import 'github_verification_screen.dart';
+import 'github_login_screen.dart';
 import '../widgets/custom_toast.dart';
 import 'permission_screen.dart';
 
@@ -153,11 +156,16 @@ class _ConnectionSettingsScreenState extends State<ConnectionSettingsScreen> {
   final TextEditingController _usernameController = TextEditingController(text: 'comma');
   final TextEditingController _keyController = TextEditingController();
   final TextEditingController _passwordController = TextEditingController(text: 'comma');
+  final TextEditingController _portController = TextEditingController(text: '22');
   final FlutterSecureStorage _storage = const FlutterSecureStorage();
   final GitHubService _githubService = GitHubService();
   bool _useKey = false;
   bool _isGitHubLoggedIn = false;
+  List<Map<String, dynamic>> _keys = [];
+  String? _currentPublicKey;
   StreamSubscription? _discoverySubscription;
+
+  Timer? _debounce;
 
   @override
   void initState() {
@@ -165,11 +173,90 @@ class _ConnectionSettingsScreenState extends State<ConnectionSettingsScreen> {
     _loadSettings();
     _checkGitHubLogin();
     _startDiscovery();
+    _keyController.addListener(_onKeyChanged);
+  }
+
+  @override
+  void dispose() {
+    _debounce?.cancel();
+    final ssh = Provider.of<SSHService>(context, listen: false);
+    ssh.stopDiscovery();
+    _discoverySubscription?.cancel();
+    _keyController.removeListener(_onKeyChanged);
+    _ipController.dispose();
+    _usernameController.dispose();
+    _keyController.dispose();
+    _passwordController.dispose();
+    _portController.dispose();
+    super.dispose();
+  }
+
+  void _onKeyChanged() {
+    if (_debounce?.isActive ?? false) _debounce!.cancel();
+    _debounce = Timer(const Duration(milliseconds: 500), () {
+      _updateCurrentPublicKey();
+    });
+  }
+
+  Future<void> _updateCurrentPublicKey() async {
+    if (!mounted) return;
+    if (_keyController.text.isEmpty) {
+      if (_currentPublicKey != null) setState(() => _currentPublicKey = null);
+      return;
+    }
+    
+    final pub = await _githubService.getPublicKeyFromPrivateKey(_keyController.text);
+    if (mounted && pub != _currentPublicKey) {
+      setState(() => _currentPublicKey = pub);
+    }
   }
 
   Future<void> _checkGitHubLogin() async {
     final loggedIn = await _githubService.isLoggedIn();
-    if (mounted) setState(() => _isGitHubLoggedIn = loggedIn);
+    if (mounted) {
+      setState(() => _isGitHubLoggedIn = loggedIn);
+      if (loggedIn) {
+        _loadKeys();
+      }
+    }
+  }
+
+  Future<void> _loadKeys() async {
+    try {
+      final keys = await _githubService.listPublicKeys();
+      if (mounted) {
+        setState(() {
+          _keys = keys;
+        });
+        _updateCurrentPublicKey();
+      }
+    } catch (e) {
+      debugPrint("Failed to load keys: $e");
+    }
+  }
+
+  Future<void> _deleteKey(int id) async {
+    try {
+      final confirm = await showDialog<bool>(
+        context: context,
+        builder: (context) => AlertDialog(
+          title: const Text("키 삭제"),
+          content: const Text("정말로 이 키를 GitHub에서 삭제하시겠습니까?"),
+          actions: [
+            TextButton(onPressed: () => Navigator.pop(context, false), child: const Text("취소")),
+            FilledButton(onPressed: () => Navigator.pop(context, true), child: const Text("삭제")),
+          ],
+        ),
+      );
+
+      if (confirm == true) {
+        await _githubService.deletePublicKey(id);
+        CustomToast.show(context, "키가 삭제되었습니다.");
+        _loadKeys();
+      }
+    } catch (e) {
+      if (mounted) CustomToast.show(context, "삭제 실패: $e", isError: true);
+    }
   }
 
   Future<void> _loginToGitHub() async {
@@ -254,126 +341,44 @@ class _ConnectionSettingsScreenState extends State<ConnectionSettingsScreen> {
   }
 
   Future<void> _startDeviceFlow() async {
-    try {
-      final deviceData = await _githubService.initiateDeviceFlow();
-      final userCode = deviceData['user_code'];
-      final verificationUri = deviceData['verification_uri'];
-      final deviceCode = deviceData['device_code'];
-      final interval = deviceData['interval'];
+    final token = await Navigator.push<String>(
+      context,
+      MaterialPageRoute(
+        builder: (context) => GithubLoginScreen(githubService: _githubService),
+      ),
+    );
 
-      if (!mounted) return;
-
-      bool polling = true;
-
-      // Start polling in background
-      _pollToken(deviceCode, interval, () => polling, (token) async {
-        if (token != null) {
-          await _githubService.saveToken(token);
-          await _checkGitHubLogin();
-          if (mounted && polling) {
-            Navigator.pop(context); // Close dialog
-            CustomToast.show(context, "GitHub 로그인 성공");
-          }
-        }
-      }, (error) {
-        if (mounted && polling) {
-           Navigator.pop(context);
-           CustomToast.show(context, error, isError: true);
-        }
-      });
-
-      await showDialog(
-        context: context,
-        barrierDismissible: false,
-        builder: (context) => AlertDialog(
-          title: const Text("GitHub 간편 로그인"),
-          content: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              const Text("1. 아래 코드를 복사하세요."),
-              const SizedBox(height: 10),
-              Container(
-                padding: const EdgeInsets.all(12),
-                decoration: BoxDecoration(
-                  color: Colors.grey[800],
-                  borderRadius: BorderRadius.circular(8),
-                ),
-                child: SelectableText(
-                  userCode,
-                  style: const TextStyle(fontSize: 24, fontWeight: FontWeight.bold, letterSpacing: 2, color: Colors.white),
-                ),
-              ),
-              const SizedBox(height: 10),
-              ElevatedButton.icon(
-                onPressed: () {
-                  Clipboard.setData(ClipboardData(text: userCode));
-                  CustomToast.show(context, "코드가 복사되었습니다.");
-                },
-                icon: const Icon(Icons.copy),
-                label: const Text("코드 복사"),
-              ),
-              const SizedBox(height: 20),
-              const Text("2. 인증 페이지를 열고 코드를 입력하세요."),
-              const SizedBox(height: 10),
-              FilledButton(
-                onPressed: () => launchUrl(Uri.parse(verificationUri)),
-                child: const Text("인증 페이지 열기"),
-              ),
-              const SizedBox(height: 20),
-              const LinearProgressIndicator(),
-              const SizedBox(height: 5),
-              const Text("인증 대기 중...", style: TextStyle(fontSize: 12, color: Colors.grey)),
-            ],
-          ),
-          actions: [
-            TextButton(
-              onPressed: () {
-                polling = false;
-                Navigator.pop(context);
-              },
-              child: const Text("취소"),
-            ),
-          ],
-        ),
-      );
-      
-      polling = false; // Stop polling when dialog closes
-      
-    } catch (e) {
-      if (mounted) CustomToast.show(context, "로그인 시작 실패: $e", isError: true);
+    if (token != null && mounted) {
+      _handleAuthSuccess(token);
     }
   }
 
-  Future<void> _pollToken(String deviceCode, int interval, bool Function() isPolling, Function(String?) onSuccess, Function(String) onError) async {
-    while (isPolling()) {
-      await Future.delayed(Duration(seconds: interval + 1));
-      if (!isPolling()) break;
-
-      try {
-        final token = await _githubService.pollForToken(deviceCode);
-        if (token != null) {
-          onSuccess(token);
-          break;
-        }
-      } catch (e) {
-        if (e.toString().contains('slow_down')) {
-          interval += 5;
-        } else if (e.toString().contains('expired_token')) {
-          onError("인증 시간이 만료되었습니다.");
-          break;
-        } else if (e.toString().contains('access_denied')) {
-          onError("인증이 거부되었습니다.");
-          break;
-        }
-        // authorization_pending: continue
-      }
-    }
+  Future<void> _showKeyGenerationDialog() async {
+    await showDialog(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text("SSH 키 생성 및 등록"),
+        content: const Text("키를 생성후 앱과 온라인에 등록하시겠습니까?"),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context),
+            child: const Text("아니오"),
+          ),
+          FilledButton(
+            onPressed: () {
+              Navigator.pop(context);
+              _generateAndRegisterKey();
+            },
+            child: const Text("예"),
+          ),
+        ],
+      ),
+    );
   }
 
   Future<void> _generateAndRegisterKey() async {
     try {
       CustomToast.show(context, "키 생성 중... (시간이 걸릴 수 있습니다)");
-      // Delay to show toast
       await Future.delayed(const Duration(milliseconds: 100));
       
       final keyPair = await _githubService.generateRSAKeyPair();
@@ -381,16 +386,86 @@ class _ConnectionSettingsScreenState extends State<ConnectionSettingsScreen> {
       if (mounted) CustomToast.show(context, "GitHub에 등록 중...");
       final title = "CarrotLink Key ${DateTime.now().millisecondsSinceEpoch}";
       await _githubService.uploadPublicKey(title, keyPair['public']!);
+      await _loadKeys();
       
       if (mounted) {
         setState(() {
           _keyController.text = keyPair['private']!;
           _useKey = true;
         });
-        CustomToast.show(context, "키 생성 및 등록 완료!");
+        
+        // Ask to install key to device
+        String targetIp = _ipController.text;
+        String targetUser = _usernameController.text.isEmpty ? 'root' : _usernameController.text;
+        
+        showDialog(
+          context: context,
+          builder: (ctx) => AlertDialog(
+            title: const Text("키 설치"),
+            content: Text(
+              "GitHub에 키가 등록되었습니다.\n\n"
+              "기기에 바로 접속하려면 이 키를 기기에도 설치해야 합니다.\n\n"
+              "대상: $targetUser@${targetIp.isEmpty ? '(IP 미설정)' : targetIp}\n"
+              "비밀번호: ${_passwordController.text.isEmpty ? '(비어있음)' : '******'}\n\n"
+              "현재 입력된 연결 정보를 사용하여 설치하시겠습니까?"
+            ),
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.pop(ctx),
+                child: const Text("나중에"),
+              ),
+              FilledButton(
+                onPressed: () async {
+                  Navigator.pop(ctx);
+                  if (targetIp.isEmpty) {
+                    CustomToast.show(context, "IP 주소가 설정되지 않았습니다. 연결 설정에서 IP를 입력해주세요.", isError: true);
+                    return;
+                  }
+                  await _installKeyToDevice(keyPair['public']!);
+                },
+                child: const Text("설치하기"),
+              ),
+            ],
+          ),
+        );
       }
     } catch (e) {
       if (mounted) CustomToast.show(context, "오류: $e", isError: true);
+    }
+  }
+
+  Future<void> _installKeyToDevice(String publicKey) async {
+    if (_ipController.text.isEmpty) {
+      CustomToast.show(context, "IP 주소를 입력해주세요.", isError: true);
+      return;
+    }
+
+    // Use password from controller or default 'comma'
+    String password = _passwordController.text;
+    if (password.isEmpty) password = 'comma';
+
+    CustomToast.show(context, "기기에 키 설치 중...");
+    
+    try {
+      final helper = SSHKeyHelper();
+      final success = await helper.installKey(
+        _ipController.text,
+        int.tryParse(_portController.text) ?? 22,
+        _usernameController.text.isEmpty ? 'root' : _usernameController.text, // Default to root if empty, or use controller
+        password, 
+        publicKey
+      );
+
+      if (mounted) {
+        if (success) {
+          CustomToast.show(context, "키 설치 완료! 이제 연결할 수 있습니다.");
+          // Optionally auto-connect here
+        } else {
+          CustomToast.show(context, "키 설치 실패. 비밀번호나 IP를 확인하세요.", isError: true);
+        }
+      }
+    } catch (e) {
+      if (mounted) CustomToast.show(context, "설치 오류: $e", isError: true);
     }
   }
 
@@ -407,17 +482,7 @@ class _ConnectionSettingsScreenState extends State<ConnectionSettingsScreen> {
     });
   }
 
-  @override
-  void dispose() {
-    final ssh = Provider.of<SSHService>(context, listen: false);
-    ssh.stopDiscovery();
-    _discoverySubscription?.cancel();
-    _ipController.dispose();
-    _usernameController.dispose();
-    _keyController.dispose();
-    _passwordController.dispose();
-    super.dispose();
-  }
+  // dispose removed (duplicate)
 
   Future<void> _loadSettings() async {
     final ip = await _storage.read(key: 'ssh_ip');
@@ -473,6 +538,19 @@ class _ConnectionSettingsScreenState extends State<ConnectionSettingsScreen> {
     }
   }
 
+  Future<void> _handleAuthSuccess(String token) async {
+    try {
+      await _githubService.saveToken(token);
+      await _checkGitHubLogin();
+      if (mounted) {
+        CustomToast.show(context, "GitHub 로그인 성공");
+        _showKeyGenerationDialog();
+      }
+    } catch (e) {
+      if (mounted) CustomToast.show(context, "로그인 처리 중 오류 발생: $e", isError: true);
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     final ssh = Provider.of<SSHService>(context);
@@ -490,6 +568,12 @@ class _ConnectionSettingsScreenState extends State<ConnectionSettingsScreen> {
           TextField(
             controller: _usernameController,
             decoration: const InputDecoration(labelText: '사용자 이름', prefixIcon: Icon(Icons.person)),
+          ),
+          const SizedBox(height: 10),
+          TextField(
+            controller: _portController,
+            decoration: const InputDecoration(labelText: '포트', prefixIcon: Icon(Icons.portable_wifi_off)),
+            keyboardType: TextInputType.number,
           ),
           const SizedBox(height: 10),
           CheckboxListTile(
@@ -575,6 +659,68 @@ class _ConnectionSettingsScreenState extends State<ConnectionSettingsScreen> {
                 ),
               ],
             ),
+          if (_isGitHubLoggedIn && _keys.isNotEmpty) ...[
+            const SizedBox(height: 24),
+            const Text("등록된 SSH 키 목록", style: TextStyle(fontWeight: FontWeight.bold)),
+            const SizedBox(height: 8),
+            ListView.builder(
+              shrinkWrap: true,
+              physics: const NeverScrollableScrollPhysics(),
+              itemCount: _keys.length,
+              itemBuilder: (context, index) {
+                final key = _keys[index];
+                final keyString = key['key'] as String? ?? '';
+                // Check if this key matches the current private key
+                // The key string from GitHub is "ssh-rsa AAA... comment"
+                // _currentPublicKey is also "ssh-rsa AAA... comment" (hopefully)
+                // We should compare the key part (middle part)
+                
+                bool isActive = false;
+                if (_currentPublicKey != null && keyString.isNotEmpty) {
+                   final parts1 = _currentPublicKey!.split(' ');
+                   final parts2 = keyString.split(' ');
+                   if (parts1.length >= 2 && parts2.length >= 2) {
+                     isActive = parts1[1] == parts2[1];
+                   }
+                }
+
+                return ListTile(
+                  contentPadding: EdgeInsets.zero,
+                  leading: Icon(
+                    isActive ? Icons.vpn_key : Icons.vpn_key_outlined, 
+                    size: 20,
+                    color: isActive ? Colors.green : null,
+                  ),
+                  title: Text(
+                    key['title'] ?? 'No Title', 
+                    style: TextStyle(
+                      fontSize: 14,
+                      fontWeight: isActive ? FontWeight.bold : FontWeight.normal,
+                      color: isActive ? Colors.green : null,
+                    ),
+                  ),
+                  subtitle: Text(
+                    keyString.length > 20 
+                        ? keyString.substring(0, 30) + '...' 
+                        : keyString,
+                    style: const TextStyle(fontSize: 12),
+                  ),
+                  trailing: IconButton(
+                    icon: const Icon(Icons.delete_outline, size: 20),
+                    onPressed: () => _deleteKey(key['id']),
+                  ),
+                  dense: true,
+                  onTap: () {
+                    if (isActive) {
+                      CustomToast.show(context, "현재 사용 중인 키입니다.");
+                    } else {
+                      CustomToast.show(context, "GitHub에는 공개키만 저장되어 있어 개인키를 가져올 수 없습니다.");
+                    }
+                  },
+                );
+              },
+            ),
+          ],
         ],
       ),
     );
@@ -811,4 +957,6 @@ class _ShareSettingsScreenState extends State<ShareSettingsScreen> {
     );
   }
 }
+
+
 

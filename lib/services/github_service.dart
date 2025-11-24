@@ -1,6 +1,7 @@
 import 'dart:convert';
 import 'dart:math';
 import 'dart:typed_data';
+import 'package:dartssh2/dartssh2.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:http/http.dart' as http;
@@ -101,6 +102,26 @@ class GitHubService {
       return jsonDecode(response.body);
     }
     return null;
+  }
+
+  Future<List<Map<String, dynamic>>> listPublicKeys() async {
+    final token = await getToken();
+    if (token == null) throw Exception("Not logged in");
+
+    final response = await http.get(
+      Uri.parse('$_baseUrl/user/keys'),
+      headers: {
+        'Authorization': 'token $token',
+        'Accept': 'application/vnd.github.v3+json',
+      },
+    );
+
+    if (response.statusCode == 200) {
+      final List<dynamic> data = jsonDecode(response.body);
+      return data.cast<Map<String, dynamic>>();
+    } else {
+      throw Exception("Failed to list keys: ${response.body}");
+    }
   }
 
   Future<bool> uploadPublicKey(String title, String key) async {
@@ -262,5 +283,57 @@ class GitHubService {
       bytes.insert(0, 0x00);
     }
     return bytes;
+  }
+
+  Future<bool> deletePublicKey(int keyId) async {
+    final token = await getToken();
+    if (token == null) throw Exception("Not logged in");
+
+    final response = await http.delete(
+      Uri.parse('$_baseUrl/user/keys/$keyId'),
+      headers: {
+        'Authorization': 'token $token',
+        'Accept': 'application/vnd.github.v3+json',
+      },
+    );
+
+    if (response.statusCode == 204) {
+      return true;
+    } else {
+      throw Exception("Failed to delete key: ${response.body}");
+    }
+  }
+
+  Future<String?> getPublicKeyFromPrivateKey(String privateKeyPem) async {
+    try {
+      return await compute(_getPublicKeyFromPrivateKeyIsolate, privateKeyPem);
+    } catch (e) {
+      return null;
+    }
+  }
+
+  static String _getPublicKeyFromPrivateKeyIsolate(String privateKeyPem) {
+    try {
+      final keys = SSHKeyPair.fromPem(privateKeyPem);
+      if (keys.isEmpty) return '';
+      
+      // Use dynamic to access properties of RsaPrivateKey from dartssh2
+      // dartssh2 RsaPrivateKey usually has n and e (BigInt)
+      final dynamic key = keys.first;
+      
+      // Check if it has n and e
+      try {
+        final n = key.n as BigInt;
+        final e = key.e as BigInt;
+        final public = RSAPublicKey(n, e); // pointycastle RSAPublicKey
+        return _encodePublicKeyToSsh(public);
+      } catch (e) {
+        // Not RSA or properties not found
+        return '';
+      }
+    } catch (e) {
+      debugPrint("Error parsing key: $e");
+      return '';
+    }
   }
 }

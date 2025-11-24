@@ -1,6 +1,5 @@
 import 'package:dartssh2/dartssh2.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
-import 'ssh_service.dart';
 
 class SSHKeyHelper {
   final FlutterSecureStorage _storage = const FlutterSecureStorage();
@@ -23,31 +22,39 @@ class SSHKeyHelper {
   }
 
   /// Connects using password, appends the public key to authorized_keys, and verifies connection.
-  Future<bool> installKey(String ip, String password, String publicKey) async {
-    final client = SSHClient(
-      await SSHSocket.connect(ip, 22, timeout: const Duration(seconds: 5)),
-      username: 'root',
-      onPasswordRequest: () => password,
-    );
-
+  Future<bool> installKey(String ip, int port, String username, String password, String publicKey) async {
+    SSHClient? client;
     try {
-      // 1. Check if key already exists to avoid duplicates
-      // 2. Append key
-      // 3. Fix permissions just in case
+      client = SSHClient(
+        await SSHSocket.connect(ip, port, timeout: const Duration(seconds: 5)),
+        username: username,
+        onPasswordRequest: () => password,
+      );
+
+      // Script to install key in multiple locations for compatibility
+      // 1. Openpilot standard: /data/params/d/GithubSshKeys
+      // 2. Linux standard: ~/.ssh/authorized_keys
       final cmd = '''
-        mkdir -p /data/params/d
-        if ! grep -qF "$publicKey" /data/params/d/GithubSshKeys; then
-          echo "$publicKey" >> /data/params/d/GithubSshKeys
-          chmod 600 /data/params/d/GithubSshKeys
-        fi
-        # Also add to standard authorized_keys for root if needed, 
-        # but Openpilot usually uses GithubSshKeys param or /root/.ssh/authorized_keys
-        mkdir -p /root/.ssh
-        if ! grep -qF "$publicKey" /root/.ssh/authorized_keys; then
-          echo "$publicKey" >> /root/.ssh/authorized_keys
-          chmod 600 /root/.ssh/authorized_keys
-        fi
-      ''';
+# Ensure directories exist
+mkdir -p /data/params/d
+mkdir -p ~/.ssh
+
+# 1. Install to Openpilot params (if writable)
+if [ -d "/data/params/d" ]; then
+  # Create GithubSshKeys if it doesn't exist (it's a file in openpilot params)
+  # But sometimes it's treated as a directory in some custom forks? 
+  # Standard openpilot uses a file named GithubSshKeys.
+  
+  # We append to it.
+  echo "$publicKey" >> /data/params/d/GithubSshKeys || true
+  chmod 600 /data/params/d/GithubSshKeys || true
+fi
+
+# 2. Install to authorized_keys
+echo "$publicKey" >> ~/.ssh/authorized_keys || true
+chmod 600 ~/.ssh/authorized_keys || true
+chmod 700 ~/.ssh || true
+''';
       
       await client.execute(cmd);
       return true;
@@ -55,7 +62,7 @@ class SSHKeyHelper {
       print("Error installing key: $e");
       return false;
     } finally {
-      client.close();
+      client?.close();
     }
   }
 

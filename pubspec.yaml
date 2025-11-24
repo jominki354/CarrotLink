@@ -31,6 +31,10 @@ dependencies:
   permission_handler: ^11.3.0
   http: ^1.2.0
   ssh_key: ^1.0.0
+  package_info_plus: ^9.0.0
+  path: ^1.9.1
+  pointycastle: ^3.9.1
+  webview_flutter: ^4.13.0
 
 dev_dependencies:
   flutter_test:
