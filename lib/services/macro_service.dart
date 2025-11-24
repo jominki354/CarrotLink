@@ -1,6 +1,7 @@
 import 'dart:convert';
 import 'package:flutter/material.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+import '../constants.dart';
 
 class MacroService extends ChangeNotifier {
   List<Macro> _macros = [];
@@ -20,14 +21,15 @@ class MacroService extends ChangeNotifier {
     } else {
       // Add defaults requested by user
       _macros = [
-        Macro(name: "Git Pull", command: "cd /data/openpilot && git pull"),
-        Macro(name: "Git Reset~1", command: "cd /data/openpilot && git reset --hard HEAD~1"),
-        Macro(name: "Reset Calibration", command: "rm /data/params/d/CalibrationParams"),
-        Macro(name: "Reset Live Params", command: "rm /data/params/d/LiveParameters"),
+        Macro(name: "Git Pull", command: "cd ${CarrotConstants.openpilotPath} && git pull"),
+        Macro(name: "Git Force Sync", command: "cd ${CarrotConstants.openpilotPath} && git fetch --all && git reset --hard origin/\$(git rev-parse --abbrev-ref HEAD)"),
+        Macro(name: "Git Reset~1", command: "cd ${CarrotConstants.openpilotPath} && git reset --hard HEAD~1"),
+        Macro(name: "Reset Calibration", command: "rm ${CarrotConstants.paramsPath}/CalibrationParams"),
+        Macro(name: "Reset Live Params", command: "rm ${CarrotConstants.paramsPath}/LiveParameters"),
         Macro(name: "Remove realdata", command: "rm -rf /data/media/0/realdata"),
         Macro(name: "Remove videos", command: "rm -rf /data/media/0/videos"),
         Macro(name: "Rebuild", command: "cd /data/openpilot && scons -c && rm .sconsign.dblite && rm -rf /tmp/scons_cache && rm prebuilt && sudo reboot"),
-        Macro(name: "Soft restart", command: "tmux new -d -s tmp; tmux split-window -v -t tmp; tmux send-keys -t tmp.0 \"/data/openpilot/launch_openpilot.sh\" C-m; tmux send-keys -t tmp.1 \"tmux kill-session -t comma\" C-m; tmux send-keys -t tmp.1 \"tmux rename-session -t tmp comma\" C-m; tmux send-keys -t tmp.1 \"exit\" C-m"),
+        Macro(name: "Soft restart", command: "tmux kill-session -t tmp 2>/dev/null; tmux new -d -s tmp; tmux split-window -v -t tmp; tmux send-keys -t tmp.0 \"/data/openpilot/launch_openpilot.sh\" C-m; tmux send-keys -t tmp.1 \"tmux kill-session -t comma\" C-m; tmux send-keys -t tmp.1 \"tmux rename-session -t tmp comma\" C-m; tmux send-keys -t tmp.1 \"exit\" C-m"),
         Macro(name: "Reboot", command: "sudo reboot"),
       ];
     }
@@ -59,14 +61,15 @@ class MacroService extends ChangeNotifier {
 
   Future<void> resetToDefaults() async {
     _macros = [
-      Macro(name: "Git Pull", command: "cd /data/openpilot && git pull"),
-      Macro(name: "Git Reset~1", command: "cd /data/openpilot && git reset --hard HEAD~1"),
-      Macro(name: "Reset Calibration", command: "rm /data/params/d/CalibrationParams"),
-      Macro(name: "Reset Live Params", command: "rm /data/params/d/LiveParameters"),
+      Macro(name: "Git Pull", command: "cd ${CarrotConstants.openpilotPath} && git pull"),
+      Macro(name: "Git Force Sync", command: "cd ${CarrotConstants.openpilotPath} && git fetch --all && git reset --hard origin/\$(git rev-parse --abbrev-ref HEAD)"),
+      Macro(name: "Git Reset~1", command: "cd ${CarrotConstants.openpilotPath} && git reset --hard HEAD~1"),
+      Macro(name: "Reset Calibration", command: "rm ${CarrotConstants.paramsPath}/CalibrationParams"),
+      Macro(name: "Reset Live Params", command: "rm ${CarrotConstants.paramsPath}/LiveParameters"),
       Macro(name: "Remove realdata", command: "rm -rf /data/media/0/realdata"),
       Macro(name: "Remove videos", command: "rm -rf /data/media/0/videos"),
       Macro(name: "Rebuild", command: "cd /data/openpilot && scons -c && rm .sconsign.dblite && rm -rf /tmp/scons_cache && rm prebuilt && sudo reboot"),
-      Macro(name: "Soft restart", command: "tmux new -d -s tmp; tmux split-window -v -t tmp; tmux send-keys -t tmp.0 \"/data/openpilot/launch_openpilot.sh\" C-m; tmux send-keys -t tmp.1 \"tmux kill-session -t comma\" C-m; tmux send-keys -t tmp.1 \"tmux rename-session -t tmp comma\" C-m; tmux send-keys -t tmp.1 \"exit\" C-m"),
+      Macro(name: "Soft restart", command: "tmux kill-session -t tmp 2>/dev/null; tmux new -d -s tmp; tmux split-window -v -t tmp; tmux send-keys -t tmp.0 \"/data/openpilot/launch_openpilot.sh\" C-m; tmux send-keys -t tmp.1 \"tmux kill-session -t comma\" C-m; tmux send-keys -t tmp.1 \"tmux rename-session -t tmp comma\" C-m; tmux send-keys -t tmp.1 \"exit\" C-m"),
       Macro(name: "Reboot", command: "sudo reboot"),
     ];
     await _saveMacros();

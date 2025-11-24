@@ -5,6 +5,8 @@ import 'package:provider/provider.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:path/path.dart' as p;
 import '../../services/ssh_service.dart';
+import '../../constants.dart';
+import '../../widgets/custom_toast.dart';
 
 class FileExplorerTab extends StatefulWidget {
   const FileExplorerTab({super.key});
@@ -14,7 +16,7 @@ class FileExplorerTab extends StatefulWidget {
 }
 
 class _FileExplorerTabState extends State<FileExplorerTab> {
-  String _currentPath = "/data/openpilot"; // Default openpilot path
+  String _currentPath = CarrotConstants.openpilotPath; // Default openpilot path
   List<SftpName> _files = [];
   List<SftpName> _filteredFiles = [];
   bool _isLoading = false;
@@ -30,6 +32,12 @@ class _FileExplorerTabState extends State<FileExplorerTab> {
   }
 
   @override
+  void dispose() {
+    _searchController.dispose();
+    super.dispose();
+  }
+
+  @override
   void didChangeDependencies() {
     super.didChangeDependencies();
     final ssh = Provider.of<SSHService>(context);
@@ -41,7 +49,7 @@ class _FileExplorerTabState extends State<FileExplorerTab> {
   Future<void> _loadBookmarks() async {
     final prefs = await SharedPreferences.getInstance();
     setState(() {
-      _bookmarks = prefs.getStringList('file_bookmarks') ?? ["/data/openpilot", "/data/media/0/videos"];
+      _bookmarks = prefs.getStringList('file_bookmarks') ?? [CarrotConstants.openpilotPath, CarrotConstants.mediaPath];
     });
   }
 
@@ -54,7 +62,7 @@ class _FileExplorerTabState extends State<FileExplorerTab> {
         _bookmarks = newBookmarks;
       });
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text("북마크 추가됨")));
+        CustomToast.show(context, "북마크 추가됨");
       }
     }
   }
@@ -103,6 +111,7 @@ class _FileExplorerTabState extends State<FileExplorerTab> {
   }
 
   Future<void> _loadFiles() async {
+    if (!mounted) return;
     final ssh = Provider.of<SSHService>(context, listen: false);
     if (!ssh.isConnected) return;
 
@@ -119,7 +128,10 @@ class _FileExplorerTabState extends State<FileExplorerTab> {
     } catch (e) {
       if (mounted) {
         setState(() => _isLoading = false);
-        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text("오류: $e")));
+        // Don't show toast for connection closed if we are navigating away
+        if (!e.toString().contains("Connection closed")) {
+           CustomToast.show(context, "오류: $e", isError: true);
+        }
       }
     }
   }
@@ -163,7 +175,7 @@ class _FileExplorerTabState extends State<FileExplorerTab> {
         if (errorStr.contains("No such file") || errorStr.contains("code 2")) {
            _showPathNotFoundError(path);
         } else {
-           ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text("이동 실패: $path\n$e")));
+           CustomToast.show(context, "이동 실패: $path\n$e", isError: true);
         }
       }
     }
@@ -185,7 +197,7 @@ class _FileExplorerTabState extends State<FileExplorerTab> {
               onPressed: () {
                 _removeBookmark(path);
                 Navigator.pop(context);
-                ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text("북마크가 제거되었습니다.")));
+                CustomToast.show(context, "북마크가 제거되었습니다.");
               },
               child: const Text("북마크 제거", style: TextStyle(color: Colors.red)),
             ),
@@ -228,11 +240,11 @@ class _FileExplorerTabState extends State<FileExplorerTab> {
         await ssh.deleteFile(fullPath);
         _loadFiles();
         if (mounted) {
-          ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text("삭제됨")));
+          CustomToast.show(context, "삭제됨");
         }
       } catch (e) {
         if (mounted) {
-          ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text("삭제 실패: $e")));
+          CustomToast.show(context, "삭제 실패: $e", isError: true);
         }
       }
     }
@@ -245,7 +257,7 @@ class _FileExplorerTabState extends State<FileExplorerTab> {
     try {
       // Check file size first. If too big, warn or skip.
       if ((item.attr.size ?? 0) > 1024 * 1024) { // 1MB limit for text editing
-         ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text("파일이 너무 커서 편집할 수 없습니다.")));
+         CustomToast.show(context, "파일이 너무 커서 편집할 수 없습니다.", isError: true);
          return;
       }
 
@@ -324,9 +336,9 @@ class _FileExplorerTabState extends State<FileExplorerTab> {
         final newPath = p.posix.join(_currentPath, newName);
         await ssh.renameFile(oldPath, newPath);
         _loadFiles();
-        if (mounted) ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text("이름 변경됨")));
+        if (mounted) CustomToast.show(context, "이름 변경됨");
       } catch (e) {
-        if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text("오류: $e")));
+        if (mounted) CustomToast.show(context, "오류: $e", isError: true);
       }
     }
   }
@@ -357,9 +369,9 @@ class _FileExplorerTabState extends State<FileExplorerTab> {
         final fullPath = p.posix.join(_currentPath, item.filename);
         await ssh.executeCommand("chmod $perms $fullPath");
         _loadFiles();
-        if (mounted) ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text("권한 변경됨")));
+        if (mounted) CustomToast.show(context, "권한 변경됨");
       } catch (e) {
-        if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text("오류: $e")));
+        if (mounted) CustomToast.show(context, "오류: $e", isError: true);
       }
     }
   }
@@ -370,7 +382,14 @@ class _FileExplorerTabState extends State<FileExplorerTab> {
       children: [
         Container(
           padding: const EdgeInsets.all(8),
-          color: Theme.of(context).colorScheme.surfaceContainer,
+          decoration: BoxDecoration(
+            color: Theme.of(context).colorScheme.surfaceContainer,
+            border: Border(
+              bottom: BorderSide(
+                color: Theme.of(context).colorScheme.outlineVariant.withOpacity(0.5),
+              ),
+            ),
+          ),
           child: Column(
             children: [
               Row(
@@ -446,6 +465,7 @@ class _FileExplorerTabState extends State<FileExplorerTab> {
         if (_isLoading) const LinearProgressIndicator(),
         Expanded(
           child: ListView.builder(
+            padding: const EdgeInsets.only(bottom: 150),
             itemCount: _filteredFiles.length,
             itemBuilder: (context, index) {
               final item = _filteredFiles[index];

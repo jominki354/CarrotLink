@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
@@ -5,6 +6,7 @@ import 'package:path_provider/path_provider.dart';
 import 'package:url_launcher/url_launcher.dart';
 import '../services/ssh_service.dart';
 import 'package:dartssh2/dartssh2.dart';
+import 'design_components.dart';
 
 class DriveListWidget extends StatefulWidget {
   const DriveListWidget({super.key});
@@ -17,6 +19,27 @@ class _DriveListWidgetState extends State<DriveListWidget> {
   List<String> _routes = [];
   bool _isLoading = false;
   bool _isInit = true;
+  Timer? _refreshTimer;
+
+  @override
+  void initState() {
+    super.initState();
+    // Auto-refresh every 15 seconds
+    _refreshTimer = Timer.periodic(const Duration(seconds: 15), (_) {
+      if (mounted) {
+        final ssh = Provider.of<SSHService>(context, listen: false);
+        if (ssh.isConnected) {
+          _loadRoutes(silent: true);
+        }
+      }
+    });
+  }
+
+  @override
+  void dispose() {
+    _refreshTimer?.cancel();
+    super.dispose();
+  }
 
   @override
   void didChangeDependencies() {
@@ -30,14 +53,18 @@ class _DriveListWidgetState extends State<DriveListWidget> {
     }
   }
 
-  Future<void> _loadRoutes() async {
+  Future<void> _loadRoutes({bool silent = false}) async {
     final ssh = Provider.of<SSHService>(context, listen: false);
     if (!ssh.isConnected) return;
 
-    setState(() => _isLoading = true);
+    if (!silent) {
+      setState(() => _isLoading = true);
+    }
+    
     try {
       // Add a small delay to ensure SFTP is ready
-      await Future.delayed(const Duration(milliseconds: 500));
+      if (!silent) await Future.delayed(const Duration(milliseconds: 500));
+      
       final files = await ssh.listFiles('/data/media/0/realdata');
       // Group by route name (remove --segment)
       // Example: 2023-10-27--12-34-56--0 -> 2023-10-27--12-34-56
@@ -165,10 +192,10 @@ class _RouteCardState extends State<RouteCard> {
 
   @override
   Widget build(BuildContext context) {
-    return Card(
-      margin: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
-      clipBehavior: Clip.antiAlias,
-      child: InkWell(
+    return Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 8),
+      child: DesignCard(
+        padding: EdgeInsets.zero,
         onTap: widget.onTap,
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,

@@ -3,6 +3,7 @@ import 'package:flutter/services.dart';
 import 'package:provider/provider.dart';
 import 'package:google_fonts/google_fonts.dart';
 import 'package:intl/date_symbol_data_local.dart';
+import 'package:flutter_background_service/flutter_background_service.dart';
 
 import 'services/ssh_service.dart';
 import 'screens/splash_screen.dart';
@@ -16,6 +17,11 @@ void main() async {
   await initializeDateFormatting('ko_KR', null);
   initializeService(); // Don't await to prevent app freeze on startup
   
+  // Listen for exit command from background service
+  FlutterBackgroundService().on('exitApp').listen((event) {
+    SystemNavigator.pop();
+  });
+
   // Lock orientation to portrait up
   await SystemChrome.setPreferredOrientations([
     DeviceOrientation.portraitUp,
@@ -86,6 +92,13 @@ class CarrotLinkApp extends StatelessWidget {
             textStyle: const TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
             elevation: 0,
           ),
+        ),
+        snackBarTheme: SnackBarThemeData(
+          backgroundColor: const Color(0xFF333333),
+          contentTextStyle: const TextStyle(color: Colors.white),
+          behavior: SnackBarBehavior.floating,
+          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+          insetPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 16),
         ),
         navigationBarTheme: NavigationBarThemeData(
           labelBehavior: NavigationDestinationLabelBehavior.alwaysShow,

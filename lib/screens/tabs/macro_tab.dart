@@ -2,6 +2,8 @@ import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import '../../services/ssh_service.dart';
 import '../../services/macro_service.dart';
+import '../../widgets/design_components.dart';
+import '../../widgets/custom_toast.dart';
 
 class MacroTab extends StatefulWidget {
   const MacroTab({super.key});
@@ -92,6 +94,7 @@ class _MacroTabState extends State<MacroTab> {
                       onPressed: () {
                         Provider.of<MacroService>(context, listen: false).resetToDefaults();
                         Navigator.pop(ctx);
+                        CustomToast.show(context, "기본 매크로가 복원되었습니다.");
                       },
                       child: const Text("복원"),
                     ),
@@ -107,26 +110,43 @@ class _MacroTabState extends State<MacroTab> {
         child: const Icon(Icons.add),
       ),
       body: ListView.builder(
-        padding: const EdgeInsets.only(left: 16, right: 16, top: 16, bottom: 80),
+        padding: const EdgeInsets.only(left: 16, right: 16, top: 16, bottom: 150),
         itemCount: macros.length,
         itemBuilder: (ctx, index) {
           final macro = macros[index];
-          return Card(
-            child: ListTile(
-              title: Text(macro.name, style: const TextStyle(fontWeight: FontWeight.bold)),
-              subtitle: Text(macro.command, maxLines: 1, overflow: TextOverflow.ellipsis),
-              trailing: Row(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  IconButton(
-                    icon: const Icon(Icons.edit, color: Colors.blue),
-                    onPressed: () => _showAddDialog(context, index: index, initialName: macro.name, initialCmd: macro.command),
-                  ),
-                  IconButton(
-                    icon: const Icon(Icons.delete, color: Colors.red),
-                    onPressed: () => Provider.of<MacroService>(context, listen: false).removeMacro(index),
-                  ),
-                ],
+          return Padding(
+            padding: const EdgeInsets.only(bottom: 8.0),
+            child: DesignCard(
+              padding: EdgeInsets.zero,
+              child: ListTile(
+                contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+                onTap: () async {
+                  final ssh = Provider.of<SSHService>(context, listen: false);
+                  if (!ssh.isConnected) {
+                    CustomToast.show(context, "기기와 연결되어 있지 않습니다.", isError: true);
+                    return;
+                  }
+                  
+                  final result = await ssh.executeCommand(macro.command);
+                  if (context.mounted) {
+                    CustomToast.show(context, "${macro.name} 실행됨");
+                  }
+                },
+                title: Text(macro.name, style: const TextStyle(fontWeight: FontWeight.bold)),
+                subtitle: Text(macro.command, maxLines: 1, overflow: TextOverflow.ellipsis),
+                trailing: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    IconButton(
+                      icon: const Icon(Icons.edit, color: Colors.blue),
+                      onPressed: () => _showAddDialog(context, index: index, initialName: macro.name, initialCmd: macro.command),
+                    ),
+                    IconButton(
+                      icon: const Icon(Icons.delete, color: Colors.red),
+                      onPressed: () => Provider.of<MacroService>(context, listen: false).removeMacro(index),
+                    ),
+                  ],
+                ),
               ),
             ),
           );

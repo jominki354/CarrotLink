@@ -1,6 +1,8 @@
 import 'dart:async';
 import 'package:flutter/material.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 import 'dashboard_screen.dart';
+import 'permission_screen.dart';
 
 class SplashScreen extends StatefulWidget {
   const SplashScreen({super.key});
@@ -13,13 +15,27 @@ class _SplashScreenState extends State<SplashScreen> {
   @override
   void initState() {
     super.initState();
-    Timer(const Duration(seconds: 1), () {
-      if (mounted) {
+    _checkFirstRun();
+  }
+
+  Future<void> _checkFirstRun() async {
+    // Wait at least 1.5 seconds for splash effect
+    await Future.delayed(const Duration(milliseconds: 1500));
+
+    final prefs = await SharedPreferences.getInstance();
+    final isFirstRun = prefs.getBool('is_first_run') ?? true;
+
+    if (mounted) {
+      if (isFirstRun) {
+        Navigator.of(context).pushReplacement(
+          MaterialPageRoute(builder: (context) => const PermissionScreen()),
+        );
+      } else {
         Navigator.of(context).pushReplacement(
           MaterialPageRoute(builder: (context) => const DashboardScreen()),
         );
       }
-    });
+    }
   }
 
   @override

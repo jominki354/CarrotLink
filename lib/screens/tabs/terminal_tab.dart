@@ -7,6 +7,7 @@ import 'package:dartssh2/dartssh2.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import '../../services/ssh_service.dart';
 import '../../services/macro_service.dart';
+import '../../widgets/custom_toast.dart';
 import 'macro_tab.dart';
 // import 'system_tab.dart'; // Removed
 
@@ -106,9 +107,7 @@ class _TerminalScreenState extends State<TerminalScreen> with AutomaticKeepAlive
       _session!.write(utf8.encode("$command\n"));
       _terminal.write("\r\n> $command\r\n");
     } else {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text("터미널이 연결되지 않았습니다.")),
-      );
+      CustomToast.show(context, "터미널이 연결되지 않았습니다.", isError: true);
     }
   }
 
@@ -174,17 +173,13 @@ class _TerminalScreenState extends State<TerminalScreen> with AutomaticKeepAlive
       if (text.isNotEmpty) {
         await Clipboard.setData(ClipboardData(text: text));
         if (mounted) {
-          ScaffoldMessenger.of(context).showSnackBar(
-            const SnackBar(content: Text("복사되었습니다."), duration: Duration(milliseconds: 500)),
-          );
+          CustomToast.show(context, "복사되었습니다.");
         }
         _terminalController.clearSelection();
       }
     } else {
        if (mounted) {
-          ScaffoldMessenger.of(context).showSnackBar(
-            const SnackBar(content: Text("선택된 텍스트가 없습니다."), duration: Duration(milliseconds: 500)),
-          );
+          CustomToast.show(context, "선택된 텍스트가 없습니다.", isError: true);
         }
     }
   }
@@ -194,9 +189,7 @@ class _TerminalScreenState extends State<TerminalScreen> with AutomaticKeepAlive
     if (data?.text != null) {
       _session?.write(utf8.encode(data!.text!));
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text("붙여넣기 완료"), duration: Duration(milliseconds: 500)),
-        );
+        CustomToast.show(context, "붙여넣기 완료");
       }
     }
   }
@@ -222,6 +215,8 @@ class _TerminalScreenState extends State<TerminalScreen> with AutomaticKeepAlive
   @override
   Widget build(BuildContext context) {
     super.build(context);
+    final macros = Provider.of<MacroService>(context).macros;
+
     return Column(
       children: [
         // Toolbar
@@ -299,47 +294,83 @@ class _TerminalScreenState extends State<TerminalScreen> with AutomaticKeepAlive
             readOnly: false,
           ),
         ),
-        // Virtual Keypad
-        if (_showVirtualKeys)
-          Container(
-            color: Theme.of(context).colorScheme.surfaceContainerHigh,
-            padding: const EdgeInsets.symmetric(vertical: 4),
-            child: Row(
-              mainAxisAlignment: MainAxisAlignment.spaceEvenly,
+        
+        // Fixed Bottom Area (Virtual Keys + Macros)
+        Container(
+          decoration: BoxDecoration(
+            color: Theme.of(context).colorScheme.surface,
+            boxShadow: [
+              BoxShadow(
+                color: Colors.black.withOpacity(0.2),
+                offset: const Offset(0, -2),
+                blurRadius: 4,
+              ),
+            ],
+          ),
+          child: SafeArea(
+            top: false,
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
               children: [
-                _buildVirtualKey("ESC", "\x1b"),
-                _buildVirtualKey("TAB", "\t"),
-                _buildVirtualKey("▲", "\x1b[A"),
-                _buildVirtualKey("▼", "\x1b[B"),
-                _buildVirtualKey("◀", "\x1b[D"),
-                _buildVirtualKey("▶", "\x1b[C"),
+                // Virtual Keypad
+                if (_showVirtualKeys)
+                  Container(
+                    color: Theme.of(context).colorScheme.surfaceContainerHigh,
+                    padding: const EdgeInsets.symmetric(vertical: 4),
+                    child: SingleChildScrollView(
+                      scrollDirection: Axis.horizontal,
+                      child: Row(
+                        children: [
+                          const SizedBox(width: 8),
+                          _buildVirtualKey("ESC", "\x1b"),
+                          const SizedBox(width: 8),
+                          _buildVirtualKey("TAB", "\t"),
+                          const SizedBox(width: 8),
+                          _buildVirtualKey("CTRL+C", "\x03"),
+                          const SizedBox(width: 8),
+                          _buildVirtualKey("UP", "\x1b[A"),
+                          const SizedBox(width: 8),
+                          _buildVirtualKey("DOWN", "\x1b[B"),
+                          const SizedBox(width: 8),
+                          _buildVirtualKey("LEFT", "\x1b[D"),
+                          const SizedBox(width: 8),
+                          _buildVirtualKey("RIGHT", "\x1b[C"),
+                          const SizedBox(width: 8),
+                          _buildVirtualKey("ENTER", "\r"),
+                          const SizedBox(width: 8),
+                        ],
+                      ),
+                    ),
+                  ),
+                
+                // Quick Macros
+                if (macros.isNotEmpty)
+                  Container(
+                    height: 50,
+                    padding: const EdgeInsets.symmetric(vertical: 4),
+                    child: ListView.builder(
+                      scrollDirection: Axis.horizontal,
+                      padding: const EdgeInsets.symmetric(horizontal: 8),
+                      itemCount: macros.length,
+                      itemBuilder: (context, index) {
+                        final macro = macros[index];
+                        return Padding(
+                          padding: const EdgeInsets.only(right: 8),
+                          child: ElevatedButton(
+                            onPressed: () => _sendMacro(macro.command),
+                            style: ElevatedButton.styleFrom(
+                              padding: const EdgeInsets.symmetric(horizontal: 12),
+                              minimumSize: const Size(0, 36),
+                            ),
+                            child: Text(macro.name),
+                          ),
+                        );
+                      },
+                    ),
+                  ),
               ],
             ),
           ),
-        // Quick Macro Bar
-        Consumer<MacroService>(
-          builder: (context, macroService, child) {
-            if (macroService.macros.isEmpty) return const SizedBox.shrink();
-            return Container(
-              height: 50,
-              color: Theme.of(context).colorScheme.surfaceContainer,
-              child: ListView.separated(
-                scrollDirection: Axis.horizontal,
-                padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 8),
-                itemCount: macroService.macros.length,
-                separatorBuilder: (context, index) => const SizedBox(width: 8),
-                itemBuilder: (context, index) {
-                  final macro = macroService.macros[index];
-                  return ActionChip(
-                    label: Text(macro.name),
-                    onPressed: () => _sendMacro(macro.command),
-                    tooltip: macro.command,
-                    visualDensity: VisualDensity.compact,
-                  );
-                },
-              ),
-            );
-          },
         ),
       ],
     );

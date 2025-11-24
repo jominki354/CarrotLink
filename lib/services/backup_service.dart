@@ -28,18 +28,58 @@ class BackupService extends ChangeNotifier {
   DateTime? _lastCheckTime;
   DateTime? get lastCheckTime => _lastCheckTime;
 
+  DateTime? _lastBackupTime;
+  DateTime? get lastBackupTime => _lastBackupTime;
+
+  Future<void> _loadPersistedState() async {
+    final prefs = await SharedPreferences.getInstance();
+    final checkTimeStr = prefs.getString('last_check_time');
+    final backupTimeStr = prefs.getString('last_backup_time');
+    
+    if (checkTimeStr != null) {
+      _lastCheckTime = DateTime.tryParse(checkTimeStr);
+    }
+    if (backupTimeStr != null) {
+      _lastBackupTime = DateTime.tryParse(backupTimeStr);
+    }
+    notifyListeners();
+  }
+
+  Future<void> _savePersistedState() async {
+    final prefs = await SharedPreferences.getInstance();
+    if (_lastCheckTime != null) {
+      await prefs.setString('last_check_time', _lastCheckTime!.toIso8601String());
+    }
+    if (_lastBackupTime != null) {
+      await prefs.setString('last_backup_time', _lastBackupTime!.toIso8601String());
+    }
+  }
+
   void _updateNotification(String content) {
     final service = FlutterBackgroundService();
-    service.invoke("updateNotification", {"content": content});
+    
+    String checkTime = _lastCheckTime != null ? DateFormat('HH:mm:ss').format(_lastCheckTime!) : "--:--:--";
+    String backupTime = _lastBackupTime != null ? DateFormat('MM/dd HH:mm').format(_lastBackupTime!) : "--/-- --:--";
+    
+    // Format: 백업 확인:확인 시간 l 최근 백업: 시간
+    // Use the passed content as prefix if it's specific (like "백업 진행 중..."), otherwise default to "백업 확인"
+    String prefix = "백업 확인";
+    if (content.contains("백업 진행 중") || content.contains("업로드")) {
+       prefix = content;
+    }
+
+    String fullContent = "$prefix: $checkTime | 최근 백업: $backupTime";
+    
+    // Use 'updateContent' as defined in background_service.dart
+    service.invoke("updateContent", {"content": fullContent});
   }
 
   Future<void> startMonitoring(SSHService ssh, GoogleDriveService driveService) async {
     _monitorTimer?.cancel();
+    await _loadPersistedState(); // Load state on start
     
     // Start Background Service to keep app alive
-    if (Platform.isAndroid) {
-      await Permission.notification.request();
-    }
+    // Permission is handled in DashboardScreen
     final service = FlutterBackgroundService();
     if (!await service.isRunning()) {
       await service.startService();
@@ -62,8 +102,9 @@ class BackupService extends ChangeNotifier {
         final result = await ssh.executeCommand(cmd);
         
         _lastCheckTime = DateTime.now();
+        _savePersistedState(); // Save state
         notifyListeners(); // Update UI with last check time
-        _updateNotification("마지막 확인: ${DateFormat('HH:mm:ss').format(_lastCheckTime!)}");
+        _updateNotification("모니터링 중");
 
         if (!result.startsWith("Error") && result.isNotEmpty) {
           final currentHash = result.trim();
@@ -228,6 +269,9 @@ class BackupService extends ChangeNotifier {
       if (backupData.isNotEmpty) {
         await file.writeAsString(jsonEncode(backupData));
         
+        _lastBackupTime = DateTime.now(); // Update last backup time
+        _savePersistedState(); // Save state
+        
         // Auto Upload
         // Try to ensure we are signed in if possible, or just check current state
         if (driveService.currentUser != null) {
@@ -254,11 +298,7 @@ class BackupService extends ChangeNotifier {
       _progress = 0.0;
       _statusMessage = "";
       notifyListeners();
-      if (_lastCheckTime != null) {
-        _updateNotification("대기 중 (마지막 확인: ${DateFormat('HH:mm:ss').format(_lastCheckTime!)})");
-      } else {
-        _updateNotification("대기 중");
-      }
+      _updateNotification("대기 중");
     }
   }
 

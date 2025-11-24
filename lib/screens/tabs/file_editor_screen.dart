@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import '../../services/ssh_service.dart';
+import '../../widgets/custom_toast.dart';
 
 class FileEditorScreen extends StatefulWidget {
   final String filePath;
@@ -107,15 +108,11 @@ class _FileEditorScreenState extends State<FileEditorScreen> {
 
       setState(() => _isDirty = false);
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text(createBackup ? "저장 및 백업 완료" : "저장되었습니다.")),
-        );
+        CustomToast.show(context, createBackup ? "저장 및 백업 완료" : "저장되었습니다.");
       }
     } catch (e) {
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text("저장 실패: $e")),
-        );
+        CustomToast.show(context, "저장 실패: $e", isError: true);
       }
     }
   }
@@ -141,9 +138,7 @@ class _FileEditorScreenState extends State<FileEditorScreen> {
       );
       _focusNode.requestFocus();
     } else {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text("찾을 수 없습니다.")),
-      );
+      CustomToast.show(context, "찾을 수 없습니다.", isError: true);
     }
   }
 
@@ -188,9 +183,7 @@ class _FileEditorScreenState extends State<FileEditorScreen> {
     final newText = text.replaceAll(query, replacement);
     if (newText != text) {
       _controller.text = newText;
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text("모두 바꾸기 완료")),
-      );
+      CustomToast.show(context, "모두 바꾸기 완료");
     }
   }
 

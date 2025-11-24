@@ -1,50 +1,70 @@
 import 'dart:async';
+import 'dart:convert';
 import 'dart:io';
 import 'dart:ui';
+import 'package:dartssh2/dartssh2.dart';
 import 'package:flutter_background_service/flutter_background_service.dart';
+import 'package:flutter_background_service_android/flutter_background_service_android.dart';
 import 'package:flutter_local_notifications/flutter_local_notifications.dart';
+
+// Notification Channel ID
+const String notificationChannelId = 'carrot_link_service';
+const int notificationId = 888;
+
+// Actions
+const String actionDisconnect = 'disconnect';
+const String actionExit = 'exit';
 
 Future<void> initializeService() async {
   final service = FlutterBackgroundService();
 
+  // Android Notification Channel Setup
   const AndroidNotificationChannel channel = AndroidNotificationChannel(
-    'carrot_link_service', // id
-    'CarrotLink Service', // title
-    description: 'CarrotLink Background Service', // description
-    importance: Importance.high, // high importance to ensure visibility
+    notificationChannelId,
+    'CarrotLink Service',
+    description: 'CarrotLink 백그라운드 연결 유지 서비스',
+    importance: Importance.low,
   );
 
   final FlutterLocalNotificationsPlugin flutterLocalNotificationsPlugin =
       FlutterLocalNotificationsPlugin();
 
+  // Initialize Notifications with Actions
+  const AndroidInitializationSettings initializationSettingsAndroid =
+      AndroidInitializationSettings('@mipmap/launcher_icon'); // Ensure icon exists
+  final InitializationSettings initializationSettings =
+      InitializationSettings(android: initializationSettingsAndroid);
+  
   await flutterLocalNotificationsPlugin.initialize(
-    const InitializationSettings(
-      android: AndroidInitializationSettings('launcher_icon'),
-      iOS: DarwinInitializationSettings(),
-    ),
+    initializationSettings,
+    onDidReceiveNotificationResponse: (NotificationResponse response) {
+      if (response.actionId == actionDisconnect) {
+        service.invoke('disconnect');
+      } else if (response.actionId == actionExit) {
+        service.invoke('stopService');
+      }
+    },
   );
 
   if (Platform.isAndroid) {
-    await flutterLocalNotificationsPlugin.resolvePlatformSpecificImplementation<
-        AndroidFlutterLocalNotificationsPlugin>()?.createNotificationChannel(channel);
+    await flutterLocalNotificationsPlugin
+        .resolvePlatformSpecificImplementation<
+            AndroidFlutterLocalNotificationsPlugin>()
+        ?.createNotificationChannel(channel);
   }
 
   await service.configure(
     androidConfiguration: AndroidConfiguration(
-      // this will be executed when app is in foreground or background in separated isolate
       onStart: onStart,
-
-      // auto start service
-      autoStart: false,
+      autoStart: true,
       isForegroundMode: true,
-
-      notificationChannelId: 'carrot_link_service',
-      initialNotificationTitle: 'CarrotLink 서비스 실행 중',
-      initialNotificationContent: '백업 및 모니터링이 활성화되었습니다.',
-      foregroundServiceNotificationId: 888,
+      notificationChannelId: notificationChannelId,
+      initialNotificationTitle: 'CarrotLink',
+      initialNotificationContent: '서비스 준비 중...',
+      foregroundServiceNotificationId: notificationId,
     ),
     iosConfiguration: IosConfiguration(
-      autoStart: false,
+      autoStart: true,
       onForeground: onStart,
       onBackground: onIosBackground,
     ),
@@ -58,79 +78,175 @@ Future<bool> onIosBackground(ServiceInstance service) async {
 
 @pragma('vm:entry-point')
 void onStart(ServiceInstance service) async {
-  // Only available for flutter 3.0.0 and later
   DartPluginRegistrant.ensureInitialized();
 
   final FlutterLocalNotificationsPlugin flutterLocalNotificationsPlugin =
       FlutterLocalNotificationsPlugin();
+  
+  // Initialize notifications in background isolate
+  const AndroidInitializationSettings initializationSettingsAndroid =
+      AndroidInitializationSettings('@mipmap/launcher_icon');
+  final InitializationSettings initializationSettings =
+      InitializationSettings(android: initializationSettingsAndroid);
+  await flutterLocalNotificationsPlugin.initialize(initializationSettings);
 
-  // Create the channel in the background isolate as well
-  const AndroidNotificationChannel channel = AndroidNotificationChannel(
-    'carrot_link_service', // id
-    'CarrotLink Service', // title
-    description: 'CarrotLink Background Service', // description
-    importance: Importance.high, // high importance to ensure visibility
-  );
+  SSHClient? sshClient;
+  Timer? heartbeatTimer;
+  String currentTitle = 'CarrotLink';
+  String currentContent = '연결 대기 중...';
 
-  await flutterLocalNotificationsPlugin.resolvePlatformSpecificImplementation<
-      AndroidFlutterLocalNotificationsPlugin>()?.createNotificationChannel(channel);
+  // Helper to update notification
+  Future<void> updateNotification({String? title, String? content, bool isConnected = false}) async {
+    if (title != null) currentTitle = title;
+    if (content != null) currentContent = content;
 
-  await flutterLocalNotificationsPlugin.initialize(
-    const InitializationSettings(
-      android: AndroidInitializationSettings('launcher_icon'),
-      iOS: DarwinInitializationSettings(),
-    ),
-  );
-
-  // Force show notification immediately to ensure service is visible
-  await flutterLocalNotificationsPlugin.show(
-    888,
-    'CarrotLink 서비스 실행 중',
-    '백업 및 모니터링이 활성화되었습니다.',
-    const NotificationDetails(
-      android: AndroidNotificationDetails(
-        'carrot_link_service',
-        'CarrotLink Service',
-        icon: 'launcher_icon',
-        ongoing: true,
-        importance: Importance.high,
-        priority: Priority.high,
-      ),
-    ),
-  );
-
-  service.on('updateNotification').listen((event) {
-    if (event != null) {
-      final String content = event['content'] as String? ?? '';
-      if (content.isNotEmpty) {
+    if (service is AndroidServiceInstance) {
+      if (await service.isForegroundService()) {
         flutterLocalNotificationsPlugin.show(
-          888,
-          'CarrotLink 서비스 실행 중',
-          content,
-          const NotificationDetails(
+          notificationId,
+          currentTitle,
+          currentContent,
+          NotificationDetails(
             android: AndroidNotificationDetails(
-              'carrot_link_service',
+              notificationChannelId,
               'CarrotLink Service',
-              icon: 'launcher_icon',
+              icon: '@mipmap/launcher_icon',
               ongoing: true,
+              actions: [
+                const AndroidNotificationAction(
+                  actionExit,
+                  '앱 종료',
+                  showsUserInterface: false,
+                  cancelNotification: false,
+                ),
+              ],
             ),
           ),
         );
       }
     }
-  });
+  }
 
-  // Keep the service alive with a timer
-  Timer.periodic(const Duration(minutes: 1), (timer) async {
-    if (service is AndroidServiceInstance) {
-      if (await service.isForegroundService()) {
-        // Optional: Update notification to show it's alive
-        // flutterLocalNotificationsPlugin.show(...)
+  // Initial Notification Update
+  await updateNotification(
+    title: 'CarrotLink',
+    content: '연결 대기 중...',
+    isConnected: false,
+  );
+
+  // Connect SSH
+  service.on('connect').listen((event) async {
+    if (event == null) return;
+    final ip = event['ip'];
+    final username = event['username'];
+    final password = event['password'];
+    final privateKey = event['privateKey'];
+
+    try {
+      await updateNotification(title: 'CarrotLink: 연결 중...', content: 'IP: $ip');
+      
+      final socket = await SSHSocket.connect(ip, 22, timeout: const Duration(seconds: 10));
+      
+      if (privateKey != null) {
+        final keys = SSHKeyPair.fromPem(privateKey);
+        sshClient = SSHClient(socket, username: username, identities: keys);
+      } else {
+        sshClient = SSHClient(socket, username: username, onPasswordRequest: () => password);
       }
+
+      await sshClient!.authenticated;
+      
+      // Set Title to IP as requested
+      await updateNotification(title: 'IP: $ip', content: '백업 확인 준비 중...', isConnected: true);
+      
+      // Notify UI
+      service.invoke('connectionState', {'isConnected': true, 'ip': ip});
+
+      // Start Heartbeat
+      heartbeatTimer?.cancel();
+      // Check every 5 seconds
+      heartbeatTimer = Timer.periodic(const Duration(seconds: 5), (timer) async {
+        if (sshClient == null || sshClient!.isClosed) {
+          timer.cancel();
+          await updateNotification(title: 'CarrotLink: 연결 끊김', content: '재연결 대기 중...');
+          service.invoke('connectionState', {'isConnected': false});
+          return;
+        }
+        try {
+          // Use a short timeout (2s) to detect dead connections quickly
+          await sshClient!.run('true').timeout(const Duration(seconds: 2));
+        } catch (e) {
+          print("Background Heartbeat failed: $e");
+          sshClient?.close();
+          // Force update notification immediately
+          await updateNotification(title: 'CarrotLink: 연결 끊김', content: '재연결 대기 중...');
+          service.invoke('connectionState', {'isConnected': false});
+        }
+      });
+
+    } catch (e) {
+      await updateNotification(title: 'CarrotLink: 연결 실패', content: '오류: ${e.toString()}');
+      service.invoke('connectionState', {'isConnected': false, 'error': e.toString()});
+      sshClient?.close();
+      sshClient = null;
     }
   });
-  
+
+  // Execute Command
+  service.on('execute').listen((event) async {
+    if (event == null) return;
+    final id = event['id'];
+    final cmd = event['cmd'];
+    
+    if (sshClient == null || sshClient!.isClosed) {
+       service.invoke('commandResult', {'id': id, 'error': 'Not connected'});
+       return;
+    }
+
+    try {
+      final result = await sshClient!.run(cmd);
+      final output = utf8.decode(result);
+      service.invoke('commandResult', {'id': id, 'output': output});
+    } catch (e) {
+      service.invoke('commandResult', {'id': id, 'error': e.toString()});
+    }
+  });
+
+  // Get Status
+  service.on('getStatus').listen((event) {
+    service.invoke('status', {
+      'isConnected': sshClient != null && !sshClient!.isClosed,
+    });
+  });
+
+  // Disconnect SSH
+  service.on('disconnect').listen((event) async {
+    heartbeatTimer?.cancel();
+    sshClient?.close();
+    sshClient = null;
+    await updateNotification(title: 'CarrotLink: 연결 해제됨', content: '대기 중...');
+  });
+
   service.on('stopService').listen((event) {
-    service.stopSelf();
+    heartbeatTimer?.cancel();
+    sshClient?.close();
+    // Invoke exitApp BEFORE stopping the service to ensure the message is sent
+    service.invoke('exitApp');
+    
+    // Give a small delay for the message to propagate before killing the service
+    Future.delayed(const Duration(milliseconds: 500), () {
+      service.stopSelf();
+    });
+  });
+
+  service.on('updateContent').listen((event) async {
+    if (event != null) {
+      await updateNotification(
+        title: event['title'], // Can be null, will use currentTitle
+        content: event['content'], // Can be null, will use currentContent
+        isConnected: sshClient != null && !sshClient!.isClosed,
+      );
+    }
   });
 }
+

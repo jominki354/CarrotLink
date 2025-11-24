@@ -1,10 +1,14 @@
 import 'dart:async';
+import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
+import 'package:permission_handler/permission_handler.dart';
+import 'package:flutter_background_service/flutter_background_service.dart';
 import '../../services/ssh_service.dart';
 import '../../services/backup_service.dart';
 import '../../services/google_drive_service.dart';
+import '../../widgets/custom_toast.dart';
 import 'tabs/home_tab.dart';
 import 'tabs/git_tab.dart';
 import 'tabs/system_tab.dart';
@@ -21,9 +25,10 @@ class DashboardScreen extends StatefulWidget {
   State<DashboardScreen> createState() => _DashboardScreenState();
 }
 
-class _DashboardScreenState extends State<DashboardScreen> {
+class _DashboardScreenState extends State<DashboardScreen> with WidgetsBindingObserver {
   int _currentIndex = 0;
   DateTime? _lastPressedAt;
+  Timer? _reconnectTimer;
 
   final List<Widget> _tabs = const [
     HomeTab(),
@@ -36,7 +41,10 @@ class _DashboardScreenState extends State<DashboardScreen> {
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
+    _requestPermissions();
     _tryAutoConnect();
+    _startReconnectLoop();
     
     // Start global backup monitoring
     WidgetsBinding.instance.addPostFrameCallback((_) {
@@ -49,9 +57,62 @@ class _DashboardScreenState extends State<DashboardScreen> {
     });
   }
 
-  Future<void> _tryAutoConnect() async {
+  Future<void> _requestPermissions() async {
+    if (Platform.isAndroid) {
+      // Request Notification Permission (Android 13+)
+      if (await Permission.notification.isDenied) {
+        await Permission.notification.request();
+      }
+      
+      final service = FlutterBackgroundService();
+      // Ensure service is running
+      if (!await service.isRunning()) {
+        service.startService();
+      }
+      
+      // Refresh service notification after permission grant
+      service.invoke('updateContent', {'title': 'CarrotLink', 'content': '연결 대기 중...'});
+    }
+  }
+
+  @override
+  void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
+    _reconnectTimer?.cancel();
+    super.dispose();
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.resumed) {
+      // App came to foreground, check connection
+      final ssh = Provider.of<SSHService>(context, listen: false);
+      if (!ssh.isConnected) {
+        print("App resumed: Connection lost, trying to reconnect...");
+        _tryAutoConnect();
+      }
+    }
+  }
+
+  void _startReconnectLoop() {
+    _reconnectTimer?.cancel();
+    // Check every 2 seconds
+    _reconnectTimer = Timer.periodic(const Duration(seconds: 2), (timer) async {
+      final ssh = Provider.of<SSHService>(context, listen: false);
+      if (!ssh.isConnected && !ssh.isConnecting) {
+        await _tryAutoConnect(silent: true);
+      }
+    });
+  }
+
+  Future<void> _tryAutoConnect({bool silent = false}) async {
+    if (!silent) {
+      // Small delay to allow UI to settle and user to see initial state
+      await Future.delayed(const Duration(milliseconds: 500));
+    }
+
     final ssh = Provider.of<SSHService>(context, listen: false);
-    if (ssh.isConnected) return;
+    if (ssh.isConnected || ssh.isConnecting) return;
 
     final storage = const FlutterSecureStorage();
     final ip = await storage.read(key: 'ssh_ip');
@@ -60,15 +121,19 @@ class _DashboardScreenState extends State<DashboardScreen> {
     final password = await storage.read(key: 'ssh_password');
 
     if (ip != null && username != null) {
+      // Quick ping check before full connect attempt
       try {
+        final socket = await Socket.connect(ip, 22, timeout: const Duration(milliseconds: 1000));
+        socket.destroy();
+        
+        // If reachable, try full connection
         await ssh.connect(ip, username, password: password, privateKey: key);
-        if (mounted) {
-          ScaffoldMessenger.of(context).showSnackBar(
-            SnackBar(content: Text('자동 연결됨: $ip')),
-          );
+        if (mounted && !silent) {
+          CustomToast.show(context, '자동 연결됨: $ip');
         }
       } catch (e) {
-        print("Auto-connect failed: $e");
+        // Silent fail if unreachable
+        if (!silent) print("Auto-connect failed: $e");
       }
     }
   }

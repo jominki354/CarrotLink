@@ -4,30 +4,99 @@ import 'dart:io';
 import 'package:dartssh2/dartssh2.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
+import 'package:flutter_background_service/flutter_background_service.dart';
+import '../constants.dart';
 
 class SSHService extends ChangeNotifier {
   SSHClient? _client;
   final FlutterSecureStorage _storage = const FlutterSecureStorage();
+
+  SSHService() {
+    _initServiceListener();
+  }
+
+  void _initServiceListener() {
+    final service = FlutterBackgroundService();
+    
+    service.on('connectionState').listen((event) {
+      if (event != null) {
+        final isServiceConnected = event['isConnected'] == true;
+        if (!isServiceConnected && isConnected) {
+           disconnect(fromService: true);
+        }
+      }
+    });
+
+    service.on('status').listen((event) async {
+      if (event != null && event['isConnected'] == true) {
+        if (!isConnected && !_isConnecting) {
+          print("Background service is connected. Attempting to sync foreground...");
+          await _reconnectFromStorage();
+        }
+      }
+    });
+
+    // Ask for status on init
+    service.invoke('getStatus');
+  }
+
+  Future<void> _reconnectFromStorage() async {
+    final ip = await _storage.read(key: 'ssh_ip');
+    final username = await _storage.read(key: 'ssh_username');
+    final password = await _storage.read(key: 'ssh_password');
+    final keyPath = await _storage.read(key: 'ssh_key_path');
+
+    if (ip != null && username != null) {
+      String? privateKey;
+      if (keyPath != null) {
+        try {
+          privateKey = await File(keyPath).readAsString();
+        } catch (e) {
+          print("Failed to read key file: $e");
+        }
+      }
+      // Reconnect using standard flow
+      connect(ip, username, password: password, privateKey: privateKey);
+    }
+  }
   
   bool get isConnected => _client != null && !_client!.isClosed;
   String _connectionStatus = "Disconnected";
   String get connectionStatus => _connectionStatus;
   String? _connectedIp;
   String? get connectedIp => _connectedIp;
+  
+  String? _targetIp;
+  String? get targetIp => _targetIp;
 
   // IP Discovery
   final StreamController<String> _ipDiscoveryController = StreamController<String>.broadcast();
   Stream<String> get ipDiscoveryStream => _ipDiscoveryController.stream;
   RawDatagramSocket? _udpSocket;
+  Timer? _heartbeatTimer;
+
+  bool _isConnecting = false;
+  bool get isConnecting => _isConnecting;
 
   Future<void> connect(String ip, String username, {String? password, String? privateKey}) async {
-    _connectionStatus = "Connecting...";
-    _connectedIp = ip;
+    if (_isConnecting) return;
+    
+    _isConnecting = true;
+    _targetIp = ip; // Set target IP immediately
+    _connectionStatus = "Connecting to $ip...";
+    // _connectedIp = ip; // Do not set IP until connected to avoid "Ghost IP"
+    
     notifyListeners();
 
     try {
       final socket = await SSHSocket.connect(ip, 22, timeout: const Duration(seconds: 5));
       
+      // Check if disconnected while connecting
+      if (!_isConnecting) {
+        socket.destroy();
+        return;
+      }
+
       if (privateKey != null) {
         try {
           final keys = SSHKeyPair.fromPem(privateKey);
@@ -52,15 +121,83 @@ class SSHService extends ChangeNotifier {
         );
       }
 
-      await _client!.authenticated;
+      await _client!.authenticated.timeout(const Duration(seconds: 10));
+
+      // Check if disconnected while authenticating
+      if (!_isConnecting) {
+        _client?.close();
+        _client = null;
+        return;
+      }
+
       _connectionStatus = "Connected";
-      notifyListeners();
+      _connectedIp = ip; // Set IP only after successful connection
+      
+      // Start Background Service Connection
+      FlutterBackgroundService().invoke('connect', {
+        'ip': ip,
+        'username': username,
+        'password': password,
+        'privateKey': privateKey,
+      });
+      
+      // Listen for immediate disconnection events from the socket
+      _client!.done.then((_) {
+        print("SSH Connection closed by OS/Remote");
+        disconnect();
+      });
+
+      _startHeartbeat();
     } catch (e) {
-      _connectionStatus = "Error: $e";
+      print("Connection failed: $e");
+      _connectionStatus = _mapErrorToMessage(e);
       _client = null;
-      notifyListeners();
+      _connectedIp = null; // Clear IP on error
       rethrow;
+    } finally {
+      _isConnecting = false;
+      notifyListeners();
     }
+  }
+
+  String _mapErrorToMessage(dynamic error) {
+    final e = error.toString();
+    if (e.contains("SocketException") || e.contains("Connection refused") || e.contains("Network is unreachable")) {
+      return "연결 실패 (네트워크)";
+    } else if (e.contains("TimeoutException")) {
+      return "연결 시간 초과";
+    } else if (e.contains("Authentication failed") || e.contains("password")) {
+      return "인증 실패";
+    } else if (e.contains("No valid keys")) {
+      return "키 오류";
+    }
+    return "오류 발생";
+  }
+
+  void _startHeartbeat() {
+    _heartbeatTimer?.cancel();
+    // 2 seconds interval for faster detection
+    _heartbeatTimer = Timer.periodic(const Duration(seconds: 2), (timer) async {
+      if (_client == null) {
+        timer.cancel();
+        return;
+      }
+      
+      if (_client!.isClosed) {
+        print("Heartbeat: Client is closed");
+        disconnect();
+        return;
+      }
+
+      try {
+        // Fallback to lightweight command since sendIgnore is not available in this version
+        // Use a short timeout (1.5s) to detect dead connections quickly
+        await _client!.run('true').timeout(const Duration(milliseconds: 1500));
+      } catch (e) {
+        print("Heartbeat failed: $e");
+        disconnect();
+      }
+    });
   }
 
 
@@ -71,6 +208,12 @@ class SSHService extends ChangeNotifier {
       final result = await _client!.run(command);
       return utf8.decode(result);
     } catch (e) {
+      print("Command execution failed: $e");
+      if (e.toString().contains("SocketException") || 
+          e.toString().contains("Connection closed") || 
+          e.toString().contains("Broken pipe")) {
+        disconnect();
+      }
       return "Error executing command: $e";
     }
   }
@@ -160,12 +303,21 @@ class SSHService extends ChangeNotifier {
     return Uint8List.fromList(chunks);
   }
 
-  Future<void> disconnect() async {
+  Future<void> disconnect({bool fromService = false}) async {
+    _isConnecting = false;
+    _heartbeatTimer?.cancel();
+    _heartbeatTimer = null;
     _sftp?.close();
     _sftp = null;
     _client?.close();
     _client = null;
     _connectionStatus = "Disconnected";
+    _connectedIp = null; // Clear IP on disconnect
+    
+    if (!fromService) {
+      FlutterBackgroundService().invoke('disconnect');
+    }
+
     notifyListeners();
   }
   
@@ -178,12 +330,12 @@ class SSHService extends ChangeNotifier {
 
   // Helper methods for Dashboard
   Future<String> getBranch() async {
-    return (await executeCommand("cd /data/openpilot && git rev-parse --abbrev-ref HEAD")).trim();
+    return (await executeCommand(CarrotConstants.gitBranchCmd)).trim();
   }
 
   Future<String> getDongleId() async {
     try {
-      return (await executeCommand("cat /data/params/d/DongleId")).trim();
+      return (await executeCommand(CarrotConstants.dongleIdCmd)).trim();
     } catch (e) {
       return "Unknown";
     }
@@ -191,7 +343,7 @@ class SSHService extends ChangeNotifier {
 
   Future<String> getSerial() async {
     try {
-      return (await executeCommand("cat /data/params/d/HardwareSerial")).trim();
+      return (await executeCommand(CarrotConstants.serialCmd)).trim();
     } catch (e) {
       return "Unknown";
     }
@@ -215,7 +367,7 @@ class SSHService extends ChangeNotifier {
   }
 
   Future<String> getCommitHash() async {
-    return (await executeCommand("cd /data/openpilot && git rev-parse --short HEAD")).trim();
+    return (await executeCommand(CarrotConstants.gitCommitCmd)).trim();
   }
 
   Future<String> getCarModel() async {
@@ -311,16 +463,16 @@ class SSHService extends ChangeNotifier {
     if (!isConnected) return;
     try {
       // Fetch latest info
-      await executeCommand("cd /data/openpilot && git fetch --all");
+      await executeCommand(CarrotConstants.gitFetchCmd);
       
       // Get current branch
-      final currentBranch = (await executeCommand("cd /data/openpilot && git rev-parse --abbrev-ref HEAD")).trim();
+      final currentBranch = (await executeCommand(CarrotConstants.gitBranchCmd)).trim();
       
       // Get local hash
-      final localHash = (await executeCommand("cd /data/openpilot && git rev-parse HEAD")).trim();
+      final localHash = (await executeCommand("cd ${CarrotConstants.openpilotPath} && git rev-parse HEAD")).trim();
       
       // Get remote hash
-      final remoteHash = (await executeCommand("cd /data/openpilot && git rev-parse origin/$currentBranch")).trim();
+      final remoteHash = (await executeCommand("cd ${CarrotConstants.openpilotPath} && git rev-parse origin/$currentBranch")).trim();
 
       if (localHash.isNotEmpty && remoteHash.isNotEmpty && localHash != remoteHash) {
         _hasGitUpdate = true;
