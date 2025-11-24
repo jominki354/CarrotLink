@@ -8,6 +8,7 @@ import 'package:flutter_background_service/flutter_background_service.dart';
 import '../../services/ssh_service.dart';
 import '../../services/backup_service.dart';
 import '../../services/google_drive_service.dart';
+import '../../services/update_service.dart';
 import '../../widgets/custom_toast.dart';
 import 'tabs/home_tab.dart';
 import 'tabs/git_tab.dart';
@@ -54,7 +55,19 @@ class _DashboardScreenState extends State<DashboardScreen> with WidgetsBindingOb
       
       // Start monitoring immediately. The service handles connection checks internally.
       backupService.startMonitoring(ssh, driveService);
+      
+      _checkUpdate();
     });
+  }
+
+  Future<void> _checkUpdate() async {
+    final hasUpdate = await context.read<UpdateService>().checkForUpdate(silent: true);
+    if (hasUpdate && mounted) {
+      showDialog(
+        context: context,
+        builder: (ctx) => const UpdateDialog(),
+      );
+    }
   }
 
   Future<void> _requestPermissions() async {

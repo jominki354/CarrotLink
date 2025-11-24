@@ -205,6 +205,18 @@ class SSHService extends ChangeNotifier {
     if (!isConnected) return "Not Connected";
     
     try {
+      // Some commands (like tmux) behave better with a PTY or when run in a shell
+      // But run() executes directly.
+      // For complex commands, especially those involving tmux or background processes,
+      // we might need to ensure they are detached properly or have the right environment.
+      
+      // If the command is a tmux command, we might want to wrap it or just run it.
+      // The issue with "stops at comma logo" suggests the process started by tmux (launch_openpilot.sh)
+      // might be dying when the SSH channel closes.
+      // Adding 'nohup' or ensuring tmux is detached (which -d does) is key.
+      // But executeCommand waits for the command to finish.
+      // If the command is "tmux new -d ...", it finishes immediately, which is good.
+      
       final result = await _client!.run(command);
       return utf8.decode(result);
     } catch (e) {

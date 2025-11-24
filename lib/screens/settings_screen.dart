@@ -1,7 +1,9 @@
 import 'dart:async';
 import 'dart:convert';
+import 'dart:io';
 import 'package:http/http.dart' as http;
 import 'package:package_info_plus/package_info_plus.dart';
+import 'package:open_filex/open_filex.dart';
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
@@ -11,6 +13,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 import '../services/ssh_service.dart';
 import '../services/backup_service.dart';
 import '../services/google_drive_service.dart';
+import '../services/update_service.dart';
 import '../widgets/custom_toast.dart';
 import 'permission_screen.dart';
 
@@ -301,113 +304,24 @@ class InfoSettingsScreen extends StatefulWidget {
 }
 
 class _InfoSettingsScreenState extends State<InfoSettingsScreen> {
-  String _currentVersion = "";
-  bool _isChecking = false;
-
-  @override
-  void initState() {
-    super.initState();
-    _loadVersion();
-  }
-
-  Future<void> _loadVersion() async {
-    final info = await PackageInfo.fromPlatform();
-    setState(() {
-      _currentVersion = "${info.version}+${info.buildNumber}";
-    });
-  }
-
-  Future<void> _checkForUpdate() async {
-    setState(() => _isChecking = true);
-    try {
-      // Assuming the repo is jominki354/CarrotLink based on context
-      final url = Uri.parse('https://api.github.com/repos/jominki354/CarrotLink/releases/latest');
-      final response = await http.get(url);
-
-      if (response.statusCode == 200) {
-        final data = jsonDecode(response.body);
-        final String tagName = data['tag_name'] ?? "";
-        // Simple version comparison (assuming tag is like v1.0.0 or 1.0.0)
-        // This is a basic check. For robust semver, use a package.
-        final latestVersion = tagName.replaceAll('v', '');
-        final currentVersionBase = _currentVersion.split('+')[0];
-
-        if (latestVersion != currentVersionBase && latestVersion.isNotEmpty) {
-           if (!mounted) return;
-           _showUpdateDialog(data);
-        } else {
-           if (!mounted) return;
-           CustomToast.show(context, "최신 버전을 사용 중입니다.");
-        }
-      } else {
-        if (mounted) CustomToast.show(context, "업데이트 확인 실패: ${response.statusCode}", isError: true);
-      }
-    } catch (e) {
-      if (mounted) CustomToast.show(context, "오류 발생: $e", isError: true);
-    } finally {
-      if (mounted) setState(() => _isChecking = false);
-    }
-  }
-
-  void _showUpdateDialog(Map<String, dynamic> releaseData) {
-    final String tagName = releaseData['tag_name'] ?? "Unknown";
-    final String body = releaseData['body'] ?? "";
-    final String htmlUrl = releaseData['html_url'] ?? "";
-    final List assets = releaseData['assets'] ?? [];
-    String? downloadUrl;
-    
-    // Find apk asset
-    for (var asset in assets) {
-      if (asset['name'].toString().endsWith('.apk')) {
-        downloadUrl = asset['browser_download_url'];
-        break;
-      }
-    }
-
+  void _showUpdateDialog(BuildContext context) {
     showDialog(
       context: context,
-      builder: (ctx) => AlertDialog(
-        title: Text("새로운 업데이트: $tagName"),
-        content: SingleChildScrollView(
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Text(body),
-              const SizedBox(height: 10),
-              if (downloadUrl != null)
-                const Text("APK 파일을 다운로드하여 설치할 수 있습니다.")
-              else
-                const Text("GitHub에서 릴리즈를 확인하세요."),
-            ],
-          ),
-        ),
-        actions: [
-          TextButton(onPressed: () => Navigator.pop(ctx), child: const Text("닫기")),
-          ElevatedButton(
-            onPressed: () async {
-              Navigator.pop(ctx);
-              final url = Uri.parse(downloadUrl ?? htmlUrl);
-              if (await canLaunchUrl(url)) {
-                await launchUrl(url, mode: LaunchMode.externalApplication);
-              }
-            },
-            child: const Text("다운로드"),
-          ),
-        ],
-      ),
+      builder: (ctx) => const UpdateDialog(),
     );
   }
 
   @override
   Widget build(BuildContext context) {
+    final updateService = context.watch<UpdateService>();
+
     return Scaffold(
       appBar: AppBar(title: const Text('정보')),
       body: ListView(
         children: [
           ListTile(
             title: const Text('버전'),
-            subtitle: Text(_currentVersion.isEmpty ? 'Loading...' : _currentVersion),
+            subtitle: Text(updateService.currentVersion.isEmpty ? 'Loading...' : updateService.currentVersion),
           ),
           ListTile(
             title: const Text('GitHub'),
@@ -419,18 +333,147 @@ class _InfoSettingsScreenState extends State<InfoSettingsScreen> {
               }
             },
           ),
+          ListTile(
+            title: const Text('업데이트 채널'),
+            subtitle: Text(updateService.channel == 'stable' ? 'Stable (안정 버전)' : 'Dev (개발 버전)'),
+            trailing: DropdownButton<String>(
+              value: updateService.channel,
+              underline: const SizedBox(),
+              items: const [
+                DropdownMenuItem(value: 'stable', child: Text('Stable')),
+                DropdownMenuItem(value: 'dev', child: Text('Dev')),
+              ],
+              onChanged: (value) {
+                if (value != null) {
+                  context.read<UpdateService>().setChannel(value);
+                }
+              },
+            ),
+          ),
           const SizedBox(height: 20),
           Padding(
             padding: const EdgeInsets.symmetric(horizontal: 16.0),
             child: ElevatedButton(
-              onPressed: _isChecking ? null : _checkForUpdate,
-              child: _isChecking 
-                ? const SizedBox(width: 20, height: 20, child: CircularProgressIndicator(strokeWidth: 2)) 
-                : const Text('업데이트 확인'),
+              onPressed: updateService.isChecking
+                  ? null
+                  : () async {
+                      if (updateService.isDownloading) {
+                        _showUpdateDialog(context);
+                        return;
+                      }
+                      final hasUpdate = await context.read<UpdateService>().checkForUpdate();
+                      if (context.mounted) {
+                        if (hasUpdate) {
+                          _showUpdateDialog(context);
+                        } else {
+                          CustomToast.show(context, "최신 버전을 사용 중입니다.");
+                        }
+                      }
+                    },
+              child: updateService.isChecking
+                  ? const SizedBox(width: 20, height: 20, child: CircularProgressIndicator(strokeWidth: 2))
+                  : const Text('업데이트 확인'),
             ),
           ),
         ],
       ),
+    );
+  }
+}
+
+class UpdateDialog extends StatelessWidget {
+  const UpdateDialog({super.key});
+
+  @override
+  Widget build(BuildContext context) {
+    final updateService = context.watch<UpdateService>();
+    final release = updateService.latestRelease;
+
+    if (release == null) return const SizedBox.shrink();
+
+    final tagName = release['tag_name'];
+    final body = release['body'];
+
+    return AlertDialog(
+      title: Text("업데이트: $tagName"),
+      content: SingleChildScrollView(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(body ?? ""),
+            const SizedBox(height: 20),
+            if (updateService.isDownloading) ...[
+              LinearProgressIndicator(value: updateService.downloadProgress),
+              const SizedBox(height: 5),
+              Text("${(updateService.downloadProgress * 100).toStringAsFixed(1)}%"),
+              Text(updateService.statusMessage),
+            ] else if (updateService.downloadedFilePath != null) ...[
+              const Text("다운로드가 완료되었습니다."),
+              const SizedBox(height: 10),
+              ElevatedButton(
+                onPressed: () => updateService.installUpdate(),
+                child: const Text("설치하기"),
+              ),
+            ] else ...[
+              const Text("지금 업데이트하시겠습니까?"),
+            ]
+          ],
+        ),
+      ),
+      actions: [
+        SizedBox(
+          width: double.maxFinite,
+          child: Row(
+            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+            children: [
+              if (!updateService.isDownloading)
+                TextButton(
+                  onPressed: () {
+                    updateService.ignoreUpdateFor3Days();
+                    Navigator.pop(context);
+                  },
+                  style: TextButton.styleFrom(
+                    padding: EdgeInsets.zero,
+                    minimumSize: const Size(50, 30),
+                    tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                    alignment: Alignment.centerLeft,
+                  ),
+                  child: const Text("3일간 보지 않기", style: TextStyle(fontSize: 13, color: Colors.grey)),
+                )
+              else
+                const SizedBox.shrink(),
+              
+              Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  TextButton(
+                    onPressed: () => Navigator.pop(context),
+                    style: TextButton.styleFrom(
+                      padding: const EdgeInsets.symmetric(horizontal: 8),
+                      minimumSize: const Size(50, 36),
+                      tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                    ),
+                    child: const Text("닫기"),
+                  ),
+                  if (!updateService.isDownloading && updateService.downloadedFilePath == null) ...[
+                    const SizedBox(width: 4),
+                    ElevatedButton(
+                      onPressed: () => updateService.downloadUpdate(),
+                      style: ElevatedButton.styleFrom(
+                        padding: const EdgeInsets.symmetric(horizontal: 12),
+                        minimumSize: const Size(0, 36),
+                        tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                      ),
+                      child: const Text("다운로드 및 설치", style: TextStyle(fontSize: 13)),
+                    ),
+                  ],
+                ],
+              ),
+            ],
+          ),
+        ),
+      ],
     );
   }
 }

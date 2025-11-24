@@ -11,6 +11,7 @@ import 'services/macro_service.dart';
 import 'services/google_drive_service.dart';
 import 'services/backup_service.dart';
 import 'services/background_service.dart';
+import 'services/update_service.dart';
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -34,6 +35,7 @@ void main() async {
         ChangeNotifierProvider(create: (_) => MacroService()),
         ChangeNotifierProvider(create: (_) => GoogleDriveService()),
         ChangeNotifierProvider(create: (_) => BackupService()),
+        ChangeNotifierProvider(create: (_) => UpdateService()),
       ],
       child: const CarrotLinkApp(),
     ),

@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import '../../services/ssh_service.dart';
+import '../../services/macro_service.dart';
 import '../../constants.dart';
 import '../../widgets/design_components.dart';
 import '../../widgets/custom_toast.dart';
@@ -57,6 +58,15 @@ class _SystemTabState extends State<SystemTab> {
 
   @override
   Widget build(BuildContext context) {
+    final macroService = Provider.of<MacroService>(context);
+    final softRestartCmd = macroService.macros.firstWhere(
+      (m) => m.name.toLowerCase() == "soft restart",
+      orElse: () => Macro(
+        name: "Soft restart", 
+        command: "tmux kill-session -t tmp 2>/dev/null; tmux new -d -s tmp; tmux split-window -v -t tmp; tmux send-keys -t tmp.0 \"/data/openpilot/launch_openpilot.sh\" C-m; tmux send-keys -t tmp.1 \"tmux kill-session -t comma\" C-m; tmux send-keys -t tmp.1 \"tmux rename-session -t tmp comma\" C-m; tmux send-keys -t tmp.1 \"exit\" C-m"
+      ),
+    ).command;
+
     return ListView(
       padding: const EdgeInsets.all(16),
       children: [
@@ -65,7 +75,9 @@ class _SystemTabState extends State<SystemTab> {
             context, 
             "소프트 재시작 (Soft Restart)", 
             Icons.refresh, 
-            "tmux kill-session -t tmp 2>/dev/null; tmux new -d -s tmp; tmux split-window -v -t tmp; tmux send-keys -t tmp.0 \"/data/openpilot/launch_openpilot.sh\" C-m; tmux send-keys -t tmp.1 \"tmux kill-session -t comma\" C-m; tmux send-keys -t tmp.1 \"tmux rename-session -t tmp comma\" C-m; tmux send-keys -t tmp.1 \"exit\" C-m",
+            // Wrap in bash login shell to ensure environment variables (like PATH) are set correctly,
+            // similar to how it runs in the interactive terminal.
+            "bash -l -c '$softRestartCmd'",
             "UI를 재시작하시겠습니까?",
             Colors.orange,
           ),
