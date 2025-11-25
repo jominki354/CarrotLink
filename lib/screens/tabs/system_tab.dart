@@ -1,9 +1,12 @@
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import '../../services/ssh_service.dart';
+import '../../services/macro_service.dart';
 import '../../constants.dart';
 import '../../widgets/design_components.dart';
 import '../../widgets/custom_toast.dart';
+
+import '../../widgets/command_execution_dialog.dart';
 
 class SystemTab extends StatefulWidget {
   const SystemTab({super.key});
@@ -42,21 +45,29 @@ class _SystemTabState extends State<SystemTab> {
     );
 
     if (confirmed == true && mounted) {
-      try {
-        await ssh.executeCommand(command);
-        if (mounted) {
-          CustomToast.show(context, "명령어 전송 완료: $title");
-        }
-      } catch (e) {
-        if (mounted) {
-          CustomToast.show(context, "명령어 전송 실패: $e", isError: true);
-        }
-      }
+      showDialog(
+        context: context,
+        barrierDismissible: false,
+        builder: (context) => CommandExecutionDialog(
+          title: title,
+          command: command,
+          autoClose: false,
+        ),
+      );
     }
   }
 
   @override
   Widget build(BuildContext context) {
+    final macroService = Provider.of<MacroService>(context);
+    final softRestartCmd = macroService.macros.firstWhere(
+      (m) => m.name.toLowerCase() == "soft restart",
+      orElse: () => Macro(
+        name: "Soft restart", 
+        command: "tmux kill-session -t tmp 2>/dev/null; tmux new -d -s tmp; tmux split-window -v -t tmp; tmux send-keys -t tmp.0 \"/data/openpilot/launch_openpilot.sh\" C-m; tmux send-keys -t tmp.1 \"tmux kill-session -t comma\" C-m; tmux send-keys -t tmp.1 \"tmux rename-session -t tmp comma\" C-m; tmux send-keys -t tmp.1 \"exit\" C-m"
+      ),
+    ).command;
+
     return ListView(
       padding: const EdgeInsets.all(16),
       children: [
@@ -65,7 +76,9 @@ class _SystemTabState extends State<SystemTab> {
             context, 
             "소프트 재시작 (Soft Restart)", 
             Icons.refresh, 
-            "tmux kill-session -t tmp 2>/dev/null; tmux new -d -s tmp; tmux split-window -v -t tmp; tmux send-keys -t tmp.0 \"/data/openpilot/launch_openpilot.sh\" C-m; tmux send-keys -t tmp.1 \"tmux kill-session -t comma\" C-m; tmux send-keys -t tmp.1 \"tmux rename-session -t tmp comma\" C-m; tmux send-keys -t tmp.1 \"exit\" C-m",
+            // Wrap in bash login shell to ensure environment variables (like PATH) are set correctly,
+            // similar to how it runs in the interactive terminal.
+            "bash -l -c '$softRestartCmd'",
             "UI를 재시작하시겠습니까?",
             Colors.orange,
           ),
@@ -85,7 +98,7 @@ class _SystemTabState extends State<SystemTab> {
             context, 
             "오픈파일럿 재빌드 (Rebuild)", 
             Icons.build, 
-            "cd /data/openpilot && scons -c && rm .sconsign.dblite && rm -rf /tmp/scons_cache && rm prebuilt && sudo reboot", 
+            "bash -l -c 'cd /data/openpilot && scons -c && rm .sconsign.dblite && rm -rf /tmp/scons_cache && rm prebuilt && sudo reboot'", 
             "재빌드를 시작하시겠습니까? 시간이 소요될 수 있습니다.",
             Colors.blue,
           ),
@@ -96,7 +109,7 @@ class _SystemTabState extends State<SystemTab> {
             context, 
             "학습 데이터 초기화 (Live Params)", 
             Icons.tune, 
-            "rm ${CarrotConstants.paramsPath}/LiveParameters", 
+            "bash -l -c 'rm ${CarrotConstants.paramsPath}/LiveParameters'", 
             "주행 학습 데이터를 초기화하시겠습니까?",
             Colors.grey,
           ),
@@ -104,7 +117,7 @@ class _SystemTabState extends State<SystemTab> {
             context, 
             "캘리브레이션 초기화 (Calibration)", 
             Icons.camera_alt, 
-            "rm ${CarrotConstants.paramsPath}/CalibrationParams", 
+            "bash -l -c 'rm ${CarrotConstants.paramsPath}/CalibrationParams'", 
             "카메라 캘리브레이션을 초기화하시겠습니까?",
             Colors.grey,
           ),
@@ -112,7 +125,7 @@ class _SystemTabState extends State<SystemTab> {
             context, 
             "녹화 영상 삭제 (Delete Videos)", 
             Icons.video_library, 
-            "rm -rf /data/media/0/videos", 
+            "bash -l -c 'rm -rf /data/media/0/videos'", 
             "모든 주행 녹화 영상을 삭제하시겠습니까? 이 작업은 되돌릴 수 없습니다.",
             Colors.red,
             isDestructive: true,

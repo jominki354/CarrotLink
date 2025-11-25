@@ -1,13 +1,3 @@
 # CarrotLink
 
-Openpilot 관리 및 설정 백업 도구입니다.
-
-## 기능
-
-- 주행 영상 목록 조회 및 재생
-- Openpilot 설정 백업 및 복원 (SSH)
-- 실시간 차량 상태 확인 (브랜치, 커밋, IP)
-
-## 설치
-
-APK 파일을 안드로이드 기기에 설치하여 사용합니다.
+Stable Release

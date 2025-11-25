@@ -101,7 +101,7 @@ class _GitTabState extends State<GitTab> {
     setState(() => _isLoading = true);
     _addLog("명령어 실행: $command");
 
-    final result = await ssh.executeCommand("cd ${CarrotConstants.openpilotPath} && $command");
+        final result = await ssh.executeCommand("bash -l -c 'cd ${CarrotConstants.openpilotPath} && $command'");
 
     if (mounted) {
       setState(() => _isLoading = false);
@@ -124,12 +124,12 @@ class _GitTabState extends State<GitTab> {
     
     try {
       // Fetch latest info from remote with prune to remove stale branches
-      await ssh.executeCommand("cd ${CarrotConstants.openpilotPath} && git fetch --all --prune");
+      await ssh.executeCommand("bash -l -c 'cd ${CarrotConstants.openpilotPath} && git fetch --all --prune'");
 
       // Get Repo URL
       String repoUrl = "";
       try {
-        final urlOutput = await ssh.executeCommand("cd ${CarrotConstants.openpilotPath} && git config --get remote.origin.url");
+        final urlOutput = await ssh.executeCommand("bash -l -c 'cd ${CarrotConstants.openpilotPath} && git config --get remote.origin.url'");
         repoUrl = urlOutput.trim();
         if (repoUrl.endsWith('.git')) {
           repoUrl = repoUrl.substring(0, repoUrl.length - 4);
@@ -139,7 +139,7 @@ class _GitTabState extends State<GitTab> {
       // Get default branch
       String defaultBranch = "";
       try {
-        final remoteShow = await ssh.executeCommand("cd ${CarrotConstants.openpilotPath} && git remote show origin");
+        final remoteShow = await ssh.executeCommand("bash -l -c 'cd ${CarrotConstants.openpilotPath} && git remote show origin'");
         final match = RegExp(r"HEAD branch: (.*)").firstMatch(remoteShow);
         if (match != null) {
           defaultBranch = match.group(1)?.trim() ?? "";
@@ -149,12 +149,12 @@ class _GitTabState extends State<GitTab> {
       // Get current branch
       String currentBranch = "";
       try {
-        currentBranch = (await ssh.executeCommand("cd ${CarrotConstants.openpilotPath} && git rev-parse --abbrev-ref HEAD")).trim();
+        currentBranch = (await ssh.executeCommand("bash -l -c 'cd ${CarrotConstants.openpilotPath} && git rev-parse --abbrev-ref HEAD'")).trim();
       } catch (_) {}
 
       // Get all branches with date and commit hash
       final output = await ssh.executeCommand(
-        "cd ${CarrotConstants.openpilotPath} && git for-each-ref --sort=-committerdate --format='%(refname:short)|%(committerdate:relative)|%(objectname)' refs/remotes/origin"
+        "bash -l -c 'cd ${CarrotConstants.openpilotPath} && git for-each-ref --sort=-committerdate --format=\"%(refname:short)|%(committerdate:relative)|%(objectname)\" refs/remotes/origin'"
       );
       
       setState(() => _isLoading = false);
@@ -167,13 +167,20 @@ class _GitTabState extends State<GitTab> {
           .map((e) {
             final parts = e.split('|');
             final fullName = parts[0];
-            // Remove 'origin/' prefix safely using regex
-            final name = fullName.replaceFirst(RegExp(r'^origin\/'), '');
+            // Remove 'origin/' prefix - handle multiple possible formats
+            String name = fullName;
+            if (name.startsWith('origin/')) {
+              name = name.substring(7);
+            } else if (name.contains('/')) {
+              // For cases like refs/remotes/origin/branch
+              final lastSlash = name.lastIndexOf('/');
+              name = name.substring(lastSlash + 1);
+            }
             final date = parts.length > 1 ? parts[1] : "";
             final hash = parts.length > 2 ? parts[2] : "";
             return {'name': name, 'date': date, 'hash': hash, 'fullName': fullName};
           })
-          .where((b) => b['name'] != 'HEAD') // Filter out HEAD
+          .where((b) => b['name'] != 'HEAD' && b['name'] != 'origin' && b['name']!.isNotEmpty) // Filter out HEAD, origin and empty names
           .toList();
 
       // Check for updates (ahead count) for each branch relative to local
@@ -183,7 +190,7 @@ class _GitTabState extends State<GitTab> {
       // Let's just check for the current branch for now to be fast, or maybe all if we can get local refs easily.
       
       // Get local refs
-      final localRefsOutput = await ssh.executeCommand("cd ${CarrotConstants.openpilotPath} && git for-each-ref --format='%(refname:short)|%(objectname)' refs/heads");
+      final localRefsOutput = await ssh.executeCommand("bash -l -c 'cd ${CarrotConstants.openpilotPath} && git for-each-ref --format=\"%(refname:short)|%(objectname)\" refs/heads'");
       final localRefs = <String, String>{};
       for (final line in localRefsOutput.split('\n')) {
         final parts = line.trim().split('|');
@@ -224,7 +231,7 @@ class _GitTabState extends State<GitTab> {
 
     try {
       // 1. Get current branch
-      final branchResult = await ssh.executeCommand("cd ${CarrotConstants.openpilotPath} && git rev-parse --abbrev-ref HEAD");
+      final branchResult = await ssh.executeCommand("bash -l -c 'cd ${CarrotConstants.openpilotPath} && git rev-parse --abbrev-ref HEAD'");
       final currentBranch = branchResult.trim();
       
       if (currentBranch.isEmpty || currentBranch.contains("fatal")) {
@@ -234,11 +241,11 @@ class _GitTabState extends State<GitTab> {
 
       // 2. Fetch all
       _addLog("원격 저장소 동기화 중 (Fetch)...");
-      await ssh.executeCommand("cd ${CarrotConstants.openpilotPath} && git fetch --all");
+      await ssh.executeCommand("bash -l -c 'cd ${CarrotConstants.openpilotPath} && git fetch --all'");
 
       // 3. Reset hard to origin/branch
       _addLog("강제 리셋 중 (Reset --hard origin/$currentBranch)...");
-      final resetResult = await ssh.executeCommand("cd ${CarrotConstants.openpilotPath} && git reset --hard origin/$currentBranch && git clean -fd");
+      final resetResult = await ssh.executeCommand("bash -l -c 'cd ${CarrotConstants.openpilotPath} && git reset --hard origin/$currentBranch && git clean -fd'");
       
       _addLog(resetResult.trim());
       CustomToast.show(context, "Git Sync 완료");

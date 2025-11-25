@@ -98,6 +98,7 @@ class DesignStatusChip extends StatelessWidget {
   final String label;
   final String value;
   final Color color;
+  final VoidCallback? onTap;
 
   const DesignStatusChip({
     super.key,
@@ -105,6 +106,7 @@ class DesignStatusChip extends StatelessWidget {
     required this.label,
     required this.value,
     required this.color,
+    this.onTap,
   });
 
   @override
@@ -113,7 +115,8 @@ class DesignStatusChip extends StatelessWidget {
         ? Colors.white
         : Colors.black;
 
-    return Expanded(
+    return GestureDetector(
+      onTap: onTap,
       child: Container(
         padding: const EdgeInsets.symmetric(vertical: 10, horizontal: 12),
         decoration: BoxDecoration(

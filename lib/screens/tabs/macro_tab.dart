@@ -5,6 +5,8 @@ import '../../services/macro_service.dart';
 import '../../widgets/design_components.dart';
 import '../../widgets/custom_toast.dart';
 
+import '../../widgets/command_execution_dialog.dart';
+
 class MacroTab extends StatefulWidget {
   const MacroTab({super.key});
 
@@ -127,10 +129,15 @@ class _MacroTabState extends State<MacroTab> {
                     return;
                   }
                   
-                  final result = await ssh.executeCommand(macro.command);
-                  if (context.mounted) {
-                    CustomToast.show(context, "${macro.name} 실행됨");
-                  }
+                  showDialog(
+                    context: context,
+                    barrierDismissible: false,
+                    builder: (context) => CommandExecutionDialog(
+                      title: macro.name,
+                      command: macro.command,
+                      autoClose: false, // Let user see the output
+                    ),
+                  );
                 },
                 title: Text(macro.name, style: const TextStyle(fontWeight: FontWeight.bold)),
                 subtitle: Text(macro.command, maxLines: 1, overflow: TextOverflow.ellipsis),

@@ -1,7 +1,12 @@
 import 'package:flutter/material.dart';
 
 class CustomToast {
+  static OverlayEntry? _lastEntry;
+
   static void show(BuildContext context, String message, {bool isError = false}) {
+    _lastEntry?.remove();
+    _lastEntry = null;
+
     final overlay = Overlay.of(context);
     final overlayEntry = OverlayEntry(
       builder: (context) => Positioned(
@@ -15,10 +20,14 @@ class CustomToast {
       ),
     );
 
+    _lastEntry = overlayEntry;
     overlay.insert(overlayEntry);
 
     Future.delayed(const Duration(seconds: 2), () {
-      overlayEntry.remove();
+      if (_lastEntry == overlayEntry) {
+        overlayEntry.remove();
+        _lastEntry = null;
+      }
     });
   }
 }

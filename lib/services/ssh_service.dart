@@ -44,17 +44,11 @@ class SSHService extends ChangeNotifier {
     final ip = await _storage.read(key: 'ssh_ip');
     final username = await _storage.read(key: 'ssh_username');
     final password = await _storage.read(key: 'ssh_password');
-    final keyPath = await _storage.read(key: 'ssh_key_path');
+    
+    // 새로운 키 저장 구조에서 로드
+    final privateKey = await _storage.read(key: 'current_private_key');
 
     if (ip != null && username != null) {
-      String? privateKey;
-      if (keyPath != null) {
-        try {
-          privateKey = await File(keyPath).readAsString();
-        } catch (e) {
-          print("Failed to read key file: $e");
-        }
-      }
       // Reconnect using standard flow
       connect(ip, username, password: password, privateKey: privateKey);
     }
@@ -70,10 +64,14 @@ class SSHService extends ChangeNotifier {
   String? get targetIp => _targetIp;
 
   // IP Discovery
-  final StreamController<String> _ipDiscoveryController = StreamController<String>.broadcast();
-  Stream<String> get ipDiscoveryStream => _ipDiscoveryController.stream;
+  StreamController<String>? _ipDiscoveryController;
+  Stream<String> get ipDiscoveryStream {
+    _ipDiscoveryController ??= StreamController<String>.broadcast();
+    return _ipDiscoveryController!.stream;
+  }
   RawDatagramSocket? _udpSocket;
   Timer? _heartbeatTimer;
+  bool _isDiscoveryActive = false;
 
   bool _isConnecting = false;
   bool get isConnecting => _isConnecting;
@@ -99,18 +97,25 @@ class SSHService extends ChangeNotifier {
 
       if (privateKey != null) {
         try {
+          print("Debug: Attempting to parse PEM key...");
+          print("Debug: Key starts with: ${privateKey.substring(0, 50)}...");
+          
           final keys = SSHKeyPair.fromPem(privateKey);
           print("Debug: Parsed ${keys.length} keys from PEM.");
+          
           if (keys.isEmpty) {
              throw Exception("No valid keys found in the provided PEM.");
           }
+          
+          print("Debug: Key type: ${keys.first.type}");
+          
           _client = SSHClient(
             socket,
             username: username,
             identities: keys,
           );
         } catch (e) {
-          print("Debug: Key parsing failed: $e");
+          print("Debug: Key parsing/auth failed: $e");
           rethrow;
         }
       } else {
@@ -132,6 +137,11 @@ class SSHService extends ChangeNotifier {
 
       _connectionStatus = "Connected";
       _connectedIp = ip; // Set IP only after successful connection
+      
+      // 키 인증 성공 시 key_verified = true 설정
+      if (privateKey != null) {
+        await _storage.write(key: 'key_verified', value: 'true');
+      }
       
       // Start Background Service Connection
       FlutterBackgroundService().invoke('connect', {
@@ -216,6 +226,44 @@ class SSHService extends ChangeNotifier {
       }
       return "Error executing command: $e";
     }
+  }
+
+  /// Executes a command and streams stdout/stderr.
+  /// Returns the exit code.
+  Stream<List<int>> executeCommandStream(String command, {Function(int)? onExit}) async* {
+    if (!isConnected) throw Exception("Not Connected");
+
+    final session = await _client!.execute(command);
+    
+    // Merge stdout and stderr
+    // Note: This is a simple merge. For strict separation, we'd need a different return type.
+    // But for a terminal-like view, merging is usually fine or we can prefix.
+    
+    // We can't easily merge two streams into one generator without a controller or complex logic,
+    // but dartssh2 sessions expose stdout and stderr streams.
+    
+    final controller = StreamController<List<int>>();
+    
+    session.stdout.listen((data) {
+      controller.add(data);
+    }, onError: (e) {
+      controller.addError(e);
+    });
+
+    session.stderr.listen((data) {
+      controller.add(data);
+    }, onError: (e) {
+      controller.addError(e);
+    });
+
+    session.done.then((_) {
+      if (onExit != null && session.exitCode != null) {
+        onExit(session.exitCode!);
+      }
+      controller.close();
+    });
+
+    yield* controller.stream;
   }
 
   Future<SSHSession> startShell() async {
@@ -378,8 +426,17 @@ class SSHService extends ChangeNotifier {
   }
 
   Future<void> startDiscovery() async {
+    if (_isDiscoveryActive) return; // 중복 실행 방지
+    _isDiscoveryActive = true;
+    
+    // 컨트롤러 재생성 (닫혀있을 수 있음)
+    if (_ipDiscoveryController == null || _ipDiscoveryController!.isClosed) {
+      _ipDiscoveryController = StreamController<String>.broadcast();
+    }
+    
     // 1. Start UDP Listener (Passive)
     try {
+      _udpSocket?.close();
       _udpSocket = await RawDatagramSocket.bind(InternetAddress.anyIPv4, 7705);
       _udpSocket!.listen((RawSocketEvent event) {
         if (event == RawSocketEvent.read) {
@@ -390,13 +447,17 @@ class SSHService extends ChangeNotifier {
               final data = json.decode(message);
               if (data is Map<String, dynamic> && data.containsKey('ip')) {
                 final ip = data['ip'] as String;
-                _ipDiscoveryController.add(ip);
+                if (_ipDiscoveryController != null && !_ipDiscoveryController!.isClosed) {
+                  _ipDiscoveryController!.add(ip);
+                }
               }
             } catch (e) {
               // Ignore malformed messages
             }
           }
         }
+      }, onError: (e) {
+        print("UDP listen error: $e");
       });
     } catch (e) {
       print("Error binding UDP socket: $e");
@@ -423,15 +484,16 @@ class SSHService extends ChangeNotifier {
 
           final prefix = "${parts[0]}.${parts[1]}.${parts[2]}";
           
-          // Scan 1-254 in parallel
-          final futures = <Future>[];
-          for (int i = 1; i < 255; i++) {
-            final targetIp = "$prefix.$i";
-            if (targetIp == ip) continue; // Skip self
-
-            futures.add(_checkPort(targetIp, 22));
+          // Scan 1-254 in batches to avoid FD limits
+          for (int i = 1; i < 255; i += 20) {
+            final futures = <Future>[];
+            for (int j = 0; j < 20 && (i + j) < 255; j++) {
+              final targetIp = "$prefix.${i + j}";
+              if (targetIp == ip) continue; // Skip self
+              futures.add(_checkPort(targetIp, 22));
+            }
+            await Future.wait(futures);
           }
-          await Future.wait(futures);
         }
       }
     } catch (e) {
@@ -443,7 +505,9 @@ class SSHService extends ChangeNotifier {
     try {
       final socket = await Socket.connect(ip, port, timeout: const Duration(milliseconds: 500));
       socket.destroy();
-      _ipDiscoveryController.add(ip);
+      if (_ipDiscoveryController != null && !_ipDiscoveryController!.isClosed) {
+        _ipDiscoveryController!.add(ip);
+      }
       print("Found openpilot at $ip");
     } catch (e) {
       // Connection failed or timed out
@@ -451,6 +515,7 @@ class SSHService extends ChangeNotifier {
   }
 
   void stopDiscovery() {
+    _isDiscoveryActive = false;
     _udpSocket?.close();
     _udpSocket = null;
   }
@@ -488,7 +553,8 @@ class SSHService extends ChangeNotifier {
   @override
   void dispose() {
     stopDiscovery();
-    _ipDiscoveryController.close();
+    _ipDiscoveryController?.close();
+    _ipDiscoveryController = null;
     super.dispose();
   }
 }

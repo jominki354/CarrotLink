@@ -24,12 +24,23 @@ class BackupService extends ChangeNotifier {
   Stream<void> get onBackupComplete => _backupCompleteController.stream;
 
   Timer? _monitorTimer;
+  SSHService? _sshService;
+  GoogleDriveService? _driveService;
+  VoidCallback? _sshListener;
+  bool _wasConnected = false;
+
   String? _lastParamsHash;
   DateTime? _lastCheckTime;
   DateTime? get lastCheckTime => _lastCheckTime;
 
   DateTime? _lastBackupTime;
   DateTime? get lastBackupTime => _lastBackupTime;
+
+  int _intervalMinutes = 3;
+  DateTime? get nextCheckTime {
+    if (_lastCheckTime == null) return null;
+    return _lastCheckTime!.add(Duration(minutes: _intervalMinutes));
+  }
 
   Future<void> _loadPersistedState() async {
     final prefs = await SharedPreferences.getInstance();
@@ -74,8 +85,55 @@ class BackupService extends ChangeNotifier {
     service.invoke("updateContent", {"content": fullContent});
   }
 
+  Future<void> _performCheck() async {
+    final ssh = _sshService;
+    final driveService = _driveService;
+    
+    if (ssh == null || driveService == null) return;
+    if (!ssh.isConnected || _isBackingUp) return;
+    
+    try {
+      // Check if params changed by hashing all files in /data/params/d/
+      // Using md5sum on all files and then hashing the result
+      // This command lists all files, calculates md5 for each, sorts them (for consistency), and hashes the result.
+      final cmd = "find /data/params/d/ -type f -exec md5sum {} + | sort | md5sum";
+      final result = await ssh.executeCommand(cmd);
+      
+      _lastCheckTime = DateTime.now();
+      _savePersistedState(); // Save state
+      notifyListeners(); // Update UI with last check time
+      _updateNotification("모니터링 중");
+
+      if (!result.startsWith("Error") && result.isNotEmpty) {
+        final currentHash = result.trim();
+        
+        // Initialize hash if null (first run)
+        if (_lastParamsHash == null) {
+           _lastParamsHash = currentHash;
+           return;
+        }
+
+        if (_lastParamsHash != currentHash) {
+          print("Params changed! Auto-backing up...");
+          await createBackup(ssh, driveService, isAuto: true);
+          _lastParamsHash = currentHash; // Update hash after backup
+        }
+      }
+    } catch (e) {
+      print("Monitor error: $e");
+    }
+  }
+
   Future<void> startMonitoring(SSHService ssh, GoogleDriveService driveService) async {
+    // Clean up existing listeners/timers first
     _monitorTimer?.cancel();
+    if (_sshService != null && _sshListener != null) {
+      _sshService!.removeListener(_sshListener!);
+    }
+
+    _sshService = ssh;
+    _driveService = driveService;
+
     await _loadPersistedState(); // Load state on start
     
     // Start Background Service to keep app alive
@@ -87,49 +145,41 @@ class BackupService extends ChangeNotifier {
     _updateNotification("모니터링 시작됨");
 
     final prefs = await SharedPreferences.getInstance();
-    final intervalMinutes = prefs.getInt('backup_interval_minutes') ?? 3;
+    _intervalMinutes = prefs.getInt('backup_interval_minutes') ?? 3;
     
-    print("Starting backup monitoring with interval: $intervalMinutes minutes");
+    print("Starting backup monitoring with interval: $_intervalMinutes minutes");
 
-    _monitorTimer = Timer.periodic(Duration(minutes: intervalMinutes), (timer) async {
-      if (!ssh.isConnected || _isBackingUp) return;
-      
-      try {
-        // Check if params changed by hashing all files in /data/params/d/
-        // Using md5sum on all files and then hashing the result
-        // This command lists all files, calculates md5 for each, sorts them (for consistency), and hashes the result.
-        final cmd = "find /data/params/d/ -type f -exec md5sum {} + | sort | md5sum";
-        final result = await ssh.executeCommand(cmd);
-        
-        _lastCheckTime = DateTime.now();
-        _savePersistedState(); // Save state
-        notifyListeners(); // Update UI with last check time
-        _updateNotification("모니터링 중");
-
-        if (!result.startsWith("Error") && result.isNotEmpty) {
-          final currentHash = result.trim();
-          
-          // Initialize hash if null (first run)
-          if (_lastParamsHash == null) {
-             _lastParamsHash = currentHash;
-             return;
-          }
-
-          if (_lastParamsHash != currentHash) {
-            print("Params changed! Auto-backing up...");
-            await createBackup(ssh, driveService, isAuto: true);
-            _lastParamsHash = currentHash; // Update hash after backup
-          }
-        }
-      } catch (e) {
-        print("Monitor error: $e");
+    // Setup SSH listener to trigger check on connection
+    _wasConnected = ssh.isConnected;
+    _sshListener = () {
+      if (ssh.isConnected && !_wasConnected) {
+        print("SSH Connected: Triggering immediate backup check");
+        _performCheck();
       }
+      _wasConnected = ssh.isConnected;
+    };
+    ssh.addListener(_sshListener!);
+
+    // Initial check (if already connected)
+    if (ssh.isConnected) {
+       _performCheck();
+    }
+
+    _monitorTimer = Timer.periodic(Duration(minutes: _intervalMinutes), (timer) async {
+      _performCheck();
     });
   }
 
   void stopMonitoring() {
     _monitorTimer?.cancel();
     _monitorTimer = null;
+    
+    if (_sshService != null && _sshListener != null) {
+      _sshService!.removeListener(_sshListener!);
+      _sshListener = null;
+    }
+    _sshService = null;
+    _driveService = null;
     
     final service = FlutterBackgroundService();
     service.invoke("stopService");

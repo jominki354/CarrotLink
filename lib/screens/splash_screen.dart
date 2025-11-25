@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+import 'package:package_info_plus/package_info_plus.dart';
 import 'dashboard_screen.dart';
 import 'permission_screen.dart';
 
@@ -12,10 +13,22 @@ class SplashScreen extends StatefulWidget {
 }
 
 class _SplashScreenState extends State<SplashScreen> {
+  String _version = "";
+
   @override
   void initState() {
     super.initState();
+    _loadVersion();
     _checkFirstRun();
+  }
+
+  Future<void> _loadVersion() async {
+    final info = await PackageInfo.fromPlatform();
+    if (mounted) {
+      setState(() {
+        _version = "v${info.version}+${info.buildNumber}";
+      });
+    }
   }
 
   Future<void> _checkFirstRun() async {
@@ -67,7 +80,7 @@ class _SplashScreenState extends State<SplashScreen> {
             const SizedBox(height: 8),
             // Version
             Text(
-              'v1.0.0',
+              _version,
               style: Theme.of(context).textTheme.bodyMedium?.copyWith(
                 color: Colors.grey,
               ),

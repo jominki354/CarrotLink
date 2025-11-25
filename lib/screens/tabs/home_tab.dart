@@ -25,6 +25,9 @@ class _HomeTabState extends State<HomeTab> {
   String _dongleId = "--";
   String _serial = "--";
   Timer? _statusTimer;
+  final GlobalKey _backupChipKey = GlobalKey();
+  final LayerLink _layerLink = LayerLink();
+  OverlayEntry? _tooltipEntry;
 
   @override
   void initState() {
@@ -53,6 +56,7 @@ class _HomeTabState extends State<HomeTab> {
   @override
   void dispose() {
     _statusTimer?.cancel();
+    _tooltipEntry?.remove();
     super.dispose();
   }
 
@@ -79,6 +83,37 @@ class _HomeTabState extends State<HomeTab> {
         print("Status refresh failed: $e");
       }
     }
+  }
+
+  void _showBackupTooltip(BuildContext context, BackupService backup) {
+    if (_tooltipEntry != null) {
+      _tooltipEntry!.remove();
+      _tooltipEntry = null;
+      return;
+    }
+
+    _tooltipEntry = OverlayEntry(
+      builder: (context) => Positioned(
+        width: 150, // Fixed width or calculate based on content
+        child: CompositedTransformFollower(
+          link: _layerLink,
+          showWhenUnlinked: false,
+          offset: const Offset(0, -50), // Position above the chip
+          child: Material(
+            color: Colors.transparent,
+            child: _BackupTimerTooltip(
+              targetTime: backup.nextCheckTime,
+              onClose: () {
+                _tooltipEntry?.remove();
+                _tooltipEntry = null;
+              },
+            ),
+          ),
+        ),
+      ),
+    );
+
+    Overlay.of(context).insert(_tooltipEntry!);
   }
 
   @override
@@ -138,7 +173,11 @@ class _HomeTabState extends State<HomeTab> {
                             ),
                             const SizedBox(height: 4),
                             Text(
-                              ssh.connectionStatus,
+                              ssh.isConnected 
+                                  ? "연결됨" 
+                                  : (ssh.connectionStatus.startsWith("Connecting") 
+                                      ? "연결 중..." 
+                                      : (ssh.connectionStatus.contains("Error") ? "연결 실패" : "연결 안 됨")),
                               style: Theme.of(context).textTheme.bodySmall?.copyWith(
                                 color: ssh.isConnected 
                                     ? Colors.green 
@@ -157,15 +196,15 @@ class _HomeTabState extends State<HomeTab> {
                   // Info Grid
                   Row(
                     children: [
-                      Expanded(child: _buildInfoItem(Icons.call_split, "브랜치", _branch)),
-                      Expanded(child: _buildInfoItem(Icons.commit, "커밋", _commit)),
+                      Expanded(child: _buildInfoItem(Icons.call_split, "브랜치", ssh.isConnected ? _branch : "연결 안 됨")),
+                      Expanded(child: _buildInfoItem(Icons.commit, "커밋", ssh.isConnected ? _commit : "연결 안 됨")),
                     ],
                   ),
                   const SizedBox(height: 16),
                   Row(
                     children: [
-                      Expanded(child: _buildInfoItem(Icons.fingerprint, "Dongle ID", _dongleId)),
-                      Expanded(child: _buildInfoItem(Icons.qr_code, "Serial", _serial)),
+                      Expanded(child: _buildInfoItem(Icons.fingerprint, "Dongle ID", ssh.isConnected ? _dongleId : "연결 안 됨")),
+                      Expanded(child: _buildInfoItem(Icons.qr_code, "Serial", ssh.isConnected ? _serial : "연결 안 됨")),
                     ],
                   ),
                 ],
@@ -222,18 +261,27 @@ class _HomeTabState extends State<HomeTab> {
                   
               return Row(
                 children: [
-                  DesignStatusChip(
-                    icon: Icons.sync, 
-                    label: "백업 확인", 
-                    value: checkTime, 
-                    color: Theme.of(context).colorScheme.secondaryContainer,
+                  Expanded(
+                    child: CompositedTransformTarget(
+                      link: _layerLink,
+                      child: DesignStatusChip(
+                        key: _backupChipKey,
+                        icon: Icons.sync, 
+                        label: "백업 확인", 
+                        value: checkTime, 
+                        color: Theme.of(context).colorScheme.secondaryContainer,
+                        onTap: () => _showBackupTooltip(context, backup),
+                      ),
+                    ),
                   ),
                   const SizedBox(width: 12),
-                  DesignStatusChip(
-                    icon: Icons.save_outlined, 
-                    label: "최근 백업", 
-                    value: backupTime,
-                    color: Theme.of(context).colorScheme.tertiaryContainer,
+                  Expanded(
+                    child: DesignStatusChip(
+                      icon: Icons.save_outlined, 
+                      label: "최근 백업", 
+                      value: backupTime,
+                      color: Theme.of(context).colorScheme.tertiaryContainer,
+                    ),
                   ),
                 ],
               );
@@ -325,4 +373,118 @@ class _HomeTabState extends State<HomeTab> {
       ],
     );
   }
+}
+
+class _BackupTimerTooltip extends StatefulWidget {
+  final DateTime? targetTime;
+  final VoidCallback onClose;
+
+  const _BackupTimerTooltip({
+    required this.targetTime,
+    required this.onClose,
+  });
+
+  @override
+  State<_BackupTimerTooltip> createState() => _BackupTimerTooltipState();
+}
+
+class _BackupTimerTooltipState extends State<_BackupTimerTooltip> with SingleTickerProviderStateMixin {
+  late Timer _timer;
+  String _timeLeft = "";
+  late AnimationController _controller;
+  late Animation<double> _opacity;
+
+  @override
+  void initState() {
+    super.initState();
+    _updateTime();
+    _timer = Timer.periodic(const Duration(seconds: 1), (_) => _updateTime());
+    
+    _controller = AnimationController(
+      vsync: this,
+      duration: const Duration(milliseconds: 200),
+    );
+    _opacity = Tween<double>(begin: 0.0, end: 1.0).animate(_controller);
+    _controller.forward();
+
+    // Auto close after 5 seconds
+    Future.delayed(const Duration(seconds: 5), () {
+      if (mounted) {
+        _controller.reverse().then((_) => widget.onClose());
+      }
+    });
+  }
+
+  void _updateTime() {
+    if (widget.targetTime == null) {
+      setState(() => _timeLeft = "예정 없음");
+      return;
+    }
+
+    final now = DateTime.now();
+    final diff = widget.targetTime!.difference(now);
+
+    if (diff.isNegative) {
+      setState(() => _timeLeft = "확인 중...");
+    } else {
+      final min = diff.inMinutes;
+      final sec = diff.inSeconds % 60;
+      setState(() => _timeLeft = "다음 확인: ${min}분 ${sec}초");
+    }
+  }
+
+  @override
+  void dispose() {
+    _timer.cancel();
+    _controller.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return FadeTransition(
+      opacity: _opacity,
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Container(
+            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+            decoration: BoxDecoration(
+              color: Colors.black87,
+              borderRadius: BorderRadius.circular(8),
+            ),
+            child: Text(
+              _timeLeft,
+              style: const TextStyle(color: Colors.white, fontSize: 12, fontWeight: FontWeight.bold),
+              textAlign: TextAlign.center,
+            ),
+          ),
+          CustomPaint(
+            painter: _TrianglePainter(color: Colors.black87),
+            size: const Size(10, 6),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _TrianglePainter extends CustomPainter {
+  final Color color;
+
+  _TrianglePainter({required this.color});
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final paint = Paint()..color = color;
+    final path = Path();
+    path.moveTo(0, 0);
+    path.lineTo(size.width / 2, size.height);
+    path.lineTo(size.width, 0);
+    path.close();
+    canvas.drawPath(path, paint);
+  }
+
+  @override
+  bool shouldRepaint(covariant CustomPainter oldDelegate) => false;
 }
