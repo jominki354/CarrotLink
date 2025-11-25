@@ -17,49 +17,6 @@ class FileEditorScreen extends StatefulWidget {
   State<FileEditorScreen> createState() => _FileEditorScreenState();
 }
 
-class _CodeEditorPainter extends CustomPainter {
-  final String text;
-  final TextStyle style;
-  final double fontSize;
-  final Color lineColor;
-
-  _CodeEditorPainter({
-    required this.text,
-    required this.style,
-    required this.fontSize,
-    required this.lineColor,
-  });
-
-  @override
-  void paint(Canvas canvas, Size size) {
-    final textPainter = TextPainter(
-      textDirection: TextDirection.ltr,
-    );
-
-    final lines = text.split('\n');
-    double y = 0;
-    final lineHeight = fontSize * 1.2; // Same as TextStyle height
-
-    // Paint line numbers and grid lines
-    final paint = Paint()
-      ..color = lineColor
-      ..strokeWidth = 1.0;
-
-    for (int i = 0; i < lines.length; i++) {
-      // Draw bottom line for each row
-      canvas.drawLine(
-        Offset(0, y + lineHeight),
-        Offset(size.width, y + lineHeight),
-        paint,
-      );
-      y += lineHeight;
-    }
-  }
-
-  @override
-  bool shouldRepaint(covariant CustomPainter oldDelegate) => true;
-}
-
 class _FileEditorScreenState extends State<FileEditorScreen> {
   late TextEditingController _controller;
   late FocusNode _focusNode;
@@ -68,8 +25,9 @@ class _FileEditorScreenState extends State<FileEditorScreen> {
   bool _showFind = false;
   final TextEditingController _findController = TextEditingController();
   final TextEditingController _replaceController = TextEditingController();
-  double _fontSize = 14.0;
-  final double _lineHeightMultiplier = 1.5; // Increased for better readability and touch targets
+  double _fontSize = 13.0;
+  int _currentLine = 1;
+  int _currentColumn = 1;
 
   @override
   void initState() {
@@ -77,23 +35,80 @@ class _FileEditorScreenState extends State<FileEditorScreen> {
     _controller = TextEditingController(text: widget.initialContent);
     _focusNode = FocusNode();
     _scrollController = ScrollController();
-    _controller.addListener(() {
-      if (!_isDirty) {
-        setState(() => _isDirty = true);
-      }
-      // Rebuild to update line numbers if line count changes
-      setState(() {});
+    
+    _controller.addListener(_onTextChanged);
+  }
+
+  void _onTextChanged() {
+    if (!_isDirty) {
+      setState(() => _isDirty = true);
+    }
+    _updateCursorPosition();
+  }
+
+  void _updateCursorPosition() {
+    final text = _controller.text;
+    final cursorPos = _controller.selection.baseOffset;
+    
+    if (cursorPos < 0 || cursorPos > text.length) {
+      setState(() {
+        _currentLine = 1;
+        _currentColumn = 1;
+      });
+      return;
+    }
+    
+    final textBeforeCursor = text.substring(0, cursorPos);
+    final lines = textBeforeCursor.split('\n');
+    
+    setState(() {
+      _currentLine = lines.length;
+      _currentColumn = lines.last.length + 1;
     });
   }
 
   @override
   void dispose() {
+    _controller.removeListener(_onTextChanged);
     _controller.dispose();
     _focusNode.dispose();
     _scrollController.dispose();
     _findController.dispose();
     _replaceController.dispose();
     super.dispose();
+  }
+
+  Future<bool> _onWillPop() async {
+    if (!_isDirty) return true;
+    
+    final result = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text("저장하지 않은 변경사항"),
+        content: const Text("변경사항을 저장하지 않고 나가시겠습니까?"),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context, false),
+            child: const Text("취소"),
+          ),
+          TextButton(
+            onPressed: () => Navigator.pop(context, true),
+            child: const Text("저장 안 함"),
+          ),
+          FilledButton(
+            onPressed: () async {
+              Navigator.pop(context, false);
+              await _save();
+              if (mounted && !_isDirty) {
+                Navigator.pop(context);
+              }
+            },
+            child: const Text("저장"),
+          ),
+        ],
+      ),
+    );
+    return result ?? false;
   }
 
   Future<void> _save() async {
@@ -142,10 +157,8 @@ class _FileEditorScreenState extends State<FileEditorScreen> {
 
     final ssh = Provider.of<SSHService>(context, listen: false);
     try {
-      // Save main file
       await ssh.writeTextFile(widget.filePath, _controller.text);
       
-      // Save backup if requested
       if (createBackup) {
         await ssh.writeTextFile("${widget.filePath}.backup", _controller.text);
       }
@@ -167,11 +180,9 @@ class _FileEditorScreenState extends State<FileEditorScreen> {
     if (query.isEmpty) return;
 
     final currentPos = _controller.selection.baseOffset;
-    // Start searching from current position + 1
     int index = text.indexOf(query, currentPos + 1);
     
     if (index == -1) {
-      // Wrap around
       index = text.indexOf(query);
     }
 
@@ -193,26 +204,15 @@ class _FileEditorScreenState extends State<FileEditorScreen> {
     
     if (query.isEmpty) return;
 
-    // Check if current selection matches query
     final selection = _controller.selection;
-    if (selection.isValid && 
-        selection.textInside(text) == query) {
-      
-      final newText = text.replaceRange(
-        selection.start,
-        selection.end,
-        replacement,
-      );
-      
+    if (selection.isValid && selection.textInside(text) == query) {
+      final newText = text.replaceRange(selection.start, selection.end, replacement);
       _controller.value = TextEditingValue(
         text: newText,
         selection: TextSelection.collapsed(offset: selection.start + replacement.length),
       );
-      
-      // Find next
       _findNext();
     } else {
-      // If not selected, find first then user clicks replace again
       _findNext();
     }
   }
@@ -231,207 +231,334 @@ class _FileEditorScreenState extends State<FileEditorScreen> {
     }
   }
 
-  @override
-  Widget build(BuildContext context) {
-    // Calculate line count
-    final lines = _controller.text.split('\n');
-    final lineCount = lines.length;
-
-    return Scaffold(
-      appBar: AppBar(
-        title: Text(widget.filePath.split('/').last),
+  void _goToLine() async {
+    final lineCount = _controller.text.split('\n').length;
+    final controller = TextEditingController();
+    
+    final result = await showDialog<int>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text("줄 이동"),
+        content: TextField(
+          controller: controller,
+          keyboardType: TextInputType.number,
+          decoration: InputDecoration(
+            hintText: "1 - $lineCount",
+            border: const OutlineInputBorder(),
+          ),
+          autofocus: true,
+          onSubmitted: (value) {
+            final line = int.tryParse(value);
+            Navigator.pop(context, line);
+          },
+        ),
         actions: [
-          IconButton(
-            icon: const Icon(Icons.text_decrease),
-            onPressed: () => setState(() => _fontSize = (_fontSize - 1).clamp(8.0, 32.0)),
-            tooltip: "글자 작게",
+          TextButton(
+            onPressed: () => Navigator.pop(context),
+            child: const Text("취소"),
           ),
-          IconButton(
-            icon: const Icon(Icons.text_increase),
-            onPressed: () => setState(() => _fontSize = (_fontSize + 1).clamp(8.0, 32.0)),
-            tooltip: "글자 크게",
-          ),
-          IconButton(
-            icon: Icon(_showFind ? Icons.search_off : Icons.search),
+          FilledButton(
             onPressed: () {
-              setState(() {
-                _showFind = !_showFind;
-              });
+              final line = int.tryParse(controller.text);
+              Navigator.pop(context, line);
             },
-          ),
-          IconButton(
-            icon: const Icon(Icons.save),
-            onPressed: _isDirty ? _save : null,
+            child: const Text("이동"),
           ),
         ],
       ),
-      body: Column(
-        children: [
-          if (_showFind)
-            Container(
-              padding: const EdgeInsets.all(12.0),
-              decoration: BoxDecoration(
-                color: Theme.of(context).colorScheme.surfaceContainer,
-                border: Border(
-                  bottom: BorderSide(color: Theme.of(context).dividerColor),
+    );
+    
+    if (result != null && result >= 1 && result <= lineCount) {
+      final lines = _controller.text.split('\n');
+      int offset = 0;
+      for (int i = 0; i < result - 1; i++) {
+        offset += lines[i].length + 1;
+      }
+      _controller.selection = TextSelection.collapsed(offset: offset);
+      _focusNode.requestFocus();
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final lines = _controller.text.split('\n');
+    final lineCount = lines.length;
+    final lineHeight = _fontSize * 1.5;
+    final lineNumberWidth = (lineCount.toString().length * 10.0 + 24).clamp(40.0, 80.0);
+    
+    // 하단 네비바 높이 + 상태바 높이 계산
+    final bottomPadding = MediaQuery.of(context).padding.bottom + 80;
+
+    return PopScope(
+      canPop: false,
+      onPopInvokedWithResult: (didPop, result) async {
+        if (didPop) return;
+        final shouldPop = await _onWillPop();
+        if (shouldPop && mounted) {
+          Navigator.of(context).pop();
+        }
+      },
+      child: Scaffold(
+        appBar: AppBar(
+          title: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(
+                widget.filePath.split('/').last,
+                style: const TextStyle(fontSize: 16),
+              ),
+              Text(
+                "줄 $_currentLine, 열 $_currentColumn",
+                style: TextStyle(
+                  fontSize: 11,
+                  color: Theme.of(context).colorScheme.onSurface.withOpacity(0.6),
                 ),
               ),
-              child: Column(
-                children: [
-                  Row(
-                    children: [
-                      Expanded(
-                        child: TextField(
-                          controller: _findController,
-                          decoration: InputDecoration(
-                            hintText: "찾기",
-                            isDense: true,
-                            prefixIcon: const Icon(Icons.search, size: 20),
-                            border: OutlineInputBorder(
-                              borderRadius: BorderRadius.circular(8),
-                            ),
-                            contentPadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-                          ),
-                          onSubmitted: (_) => _findNext(),
-                        ),
-                      ),
-                      const SizedBox(width: 8),
-                      IconButton.filledTonal(
-                        icon: const Icon(Icons.arrow_downward),
-                        onPressed: _findNext,
-                        tooltip: "다음 찾기",
-                      ),
-                    ],
-                  ),
-                  const SizedBox(height: 8),
-                  Row(
-                    children: [
-                      Expanded(
-                        child: TextField(
-                          controller: _replaceController,
-                          decoration: InputDecoration(
-                            hintText: "바꾸기",
-                            isDense: true,
-                            prefixIcon: const Icon(Icons.edit, size: 20),
-                            border: OutlineInputBorder(
-                              borderRadius: BorderRadius.circular(8),
-                            ),
-                            contentPadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-                          ),
-                        ),
-                      ),
-                      const SizedBox(width: 8),
-                      TextButton(
-                        onPressed: _replace,
-                        child: const Text("바꾸기"),
-                      ),
-                      TextButton(
-                        onPressed: _replaceAll,
-                        child: const Text("모두"),
-                      ),
-                    ],
-                  ),
-                ],
-              ),
+            ],
+          ),
+          leading: IconButton(
+            icon: const Icon(Icons.arrow_back),
+            onPressed: () async {
+              final shouldPop = await _onWillPop();
+              if (shouldPop && mounted) {
+                Navigator.of(context).pop();
+              }
+            },
+          ),
+          actions: [
+            IconButton(
+              icon: const Icon(Icons.text_decrease, size: 20),
+              onPressed: () => setState(() => _fontSize = (_fontSize - 1).clamp(8.0, 24.0)),
+              tooltip: "글자 작게",
             ),
-          Expanded(
-            child: Container(
-              color: Theme.of(context).colorScheme.surface,
-              child: SingleChildScrollView(
-                child: Row(
-                  crossAxisAlignment: CrossAxisAlignment.start,
+            IconButton(
+              icon: const Icon(Icons.text_increase, size: 20),
+              onPressed: () => setState(() => _fontSize = (_fontSize + 1).clamp(8.0, 24.0)),
+              tooltip: "글자 크게",
+            ),
+            IconButton(
+              icon: const Icon(Icons.format_list_numbered, size: 20),
+              onPressed: _goToLine,
+              tooltip: "줄 이동",
+            ),
+            IconButton(
+              icon: Icon(_showFind ? Icons.search_off : Icons.search, size: 20),
+              onPressed: () => setState(() => _showFind = !_showFind),
+              tooltip: "찾기/바꾸기",
+            ),
+            IconButton(
+              icon: Icon(Icons.save, size: 20, color: _isDirty ? Colors.orange : null),
+              onPressed: _isDirty ? _save : null,
+              tooltip: "저장",
+            ),
+          ],
+        ),
+        body: Column(
+          children: [
+            // 찾기/바꾸기 패널
+            if (_showFind)
+              Container(
+                padding: const EdgeInsets.all(12.0),
+                decoration: BoxDecoration(
+                  color: Theme.of(context).colorScheme.surfaceContainerHighest,
+                  border: Border(bottom: BorderSide(color: Theme.of(context).dividerColor)),
+                ),
+                child: Column(
                   children: [
-                    // Line Numbers
-                    Container(
-                      width: 40,
-                      padding: const EdgeInsets.only(top: 16, right: 4), // Match TextField padding
-                      color: Theme.of(context).colorScheme.surfaceContainer,
-                      child: Column(
-                        children: List.generate(lineCount, (index) {
-                          return Container(
-                            height: _fontSize * _lineHeightMultiplier,
-                            alignment: Alignment.centerRight,
-                            decoration: BoxDecoration(
-                              border: Border(
-                                bottom: BorderSide(
-                                  color: Colors.grey.withOpacity(0.1),
-                                  width: 1,
-                                ),
-                              ),
+                    Row(
+                      children: [
+                        Expanded(
+                          child: TextField(
+                            controller: _findController,
+                            decoration: InputDecoration(
+                              hintText: "찾기",
+                              isDense: true,
+                              prefixIcon: const Icon(Icons.search, size: 18),
+                              border: OutlineInputBorder(borderRadius: BorderRadius.circular(8)),
+                              contentPadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
                             ),
-                            child: Text(
-                              '${index + 1}',
-                              style: TextStyle(
-                                fontFamily: 'monospace',
-                                fontSize: _fontSize,
-                                color: Colors.grey,
-                                height: 1.0, // Reset height to center in container
-                              ),
-                            ),
-                          );
-                        }),
-                      ),
-                    ),
-                    // Vertical Divider
-                    Container(width: 1, color: Colors.grey.withOpacity(0.5)),
-                    // Text Field
-                    Expanded(
-                      child: SingleChildScrollView(
-                        scrollDirection: Axis.horizontal,
-                        child: SizedBox(
-                          width: 10000, // Large width to prevent wrapping
-                          child: Stack(
-                            children: [
-                              // Grid Lines Background
-                              Positioned.fill(
-                                top: 16, // Match TextField padding
-                                child: Column(
-                                  crossAxisAlignment: CrossAxisAlignment.start,
-                                  children: List.generate(lineCount, (index) {
-                                    return Container(
-                                      height: _fontSize * _lineHeightMultiplier,
-                                      width: double.infinity,
-                                      decoration: BoxDecoration(
-                                        border: Border(
-                                          bottom: BorderSide(
-                                            color: Colors.grey.withOpacity(0.1),
-                                            width: 1,
-                                          ),
-                                        ),
-                                      ),
-                                    );
-                                  }),
-                                ),
-                              ),
-                              // Actual Text Field
-                              TextField(
-                                controller: _controller,
-                                focusNode: _focusNode,
-                                maxLines: null, // Allow growing
-                                keyboardType: TextInputType.multiline,
-                                style: TextStyle(
-                                  fontFamily: 'monospace',
-                                  fontSize: _fontSize,
-                                  color: Theme.of(context).textTheme.bodyLarge?.color,
-                                  height: _lineHeightMultiplier, // Match container height
-                                ),
-                                decoration: const InputDecoration(
-                                  contentPadding: EdgeInsets.all(16),
-                                  border: InputBorder.none, // Remove border
-                                  isDense: true,
-                                ),
-                              ),
-                            ],
+                            style: const TextStyle(fontSize: 14),
+                            onSubmitted: (_) => _findNext(),
                           ),
                         ),
-                      ),
+                        const SizedBox(width: 8),
+                        IconButton.filledTonal(
+                          icon: const Icon(Icons.arrow_downward, size: 18),
+                          onPressed: _findNext,
+                          tooltip: "다음 찾기",
+                        ),
+                      ],
+                    ),
+                    const SizedBox(height: 8),
+                    Row(
+                      children: [
+                        Expanded(
+                          child: TextField(
+                            controller: _replaceController,
+                            decoration: InputDecoration(
+                              hintText: "바꾸기",
+                              isDense: true,
+                              prefixIcon: const Icon(Icons.find_replace, size: 18),
+                              border: OutlineInputBorder(borderRadius: BorderRadius.circular(8)),
+                              contentPadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+                            ),
+                            style: const TextStyle(fontSize: 14),
+                          ),
+                        ),
+                        const SizedBox(width: 8),
+                        TextButton(onPressed: _replace, child: const Text("바꾸기")),
+                        TextButton(onPressed: _replaceAll, child: const Text("모두")),
+                      ],
                     ),
                   ],
                 ),
               ),
+            
+            // 에디터 본체 - CustomScrollView 사용으로 동기화 문제 해결
+            Expanded(
+              child: LayoutBuilder(
+                builder: (context, constraints) {
+                  return SingleChildScrollView(
+                    controller: _scrollController,
+                    child: Padding(
+                      // 하단에 여유 공간 추가 (네비바에 가려지지 않도록)
+                      padding: EdgeInsets.only(bottom: bottomPadding),
+                      child: IntrinsicHeight(
+                        child: Row(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            // 줄 번호 (같은 스크롤 컨테이너 안에 있으므로 자동 동기화)
+                            Container(
+                              width: lineNumberWidth,
+                              decoration: BoxDecoration(
+                                color: Theme.of(context).colorScheme.surfaceContainerHighest,
+                                border: Border(
+                                  right: BorderSide(
+                                    color: Theme.of(context).dividerColor,
+                                  ),
+                                ),
+                              ),
+                              child: Column(
+                                children: List.generate(lineCount, (index) {
+                                  final isCurrentLine = index + 1 == _currentLine;
+                                  return Container(
+                                    height: lineHeight,
+                                    alignment: Alignment.centerRight,
+                                    padding: const EdgeInsets.only(right: 8, left: 4),
+                                    decoration: isCurrentLine ? BoxDecoration(
+                                      color: Theme.of(context).colorScheme.primary.withOpacity(0.1),
+                                    ) : null,
+                                    child: Text(
+                                      '${index + 1}',
+                                      style: TextStyle(
+                                        fontFamily: 'monospace',
+                                        fontSize: _fontSize,
+                                        height: 1.5,
+                                        color: isCurrentLine 
+                                            ? Theme.of(context).colorScheme.primary
+                                            : Theme.of(context).colorScheme.onSurface.withOpacity(0.5),
+                                        fontWeight: isCurrentLine ? FontWeight.bold : FontWeight.normal,
+                                      ),
+                                    ),
+                                  );
+                                }),
+                              ),
+                            ),
+                            // 텍스트 에디터
+                            Expanded(
+                              child: SingleChildScrollView(
+                                scrollDirection: Axis.horizontal,
+                                child: ConstrainedBox(
+                                  constraints: BoxConstraints(
+                                    minWidth: constraints.maxWidth - lineNumberWidth,
+                                  ),
+                                  child: IntrinsicWidth(
+                                    child: TextField(
+                                      controller: _controller,
+                                      focusNode: _focusNode,
+                                      maxLines: null,
+                                      keyboardType: TextInputType.multiline,
+                                      style: TextStyle(
+                                        fontFamily: 'monospace',
+                                        fontSize: _fontSize,
+                                        height: 1.5,
+                                      ),
+                                      decoration: const InputDecoration(
+                                        contentPadding: EdgeInsets.symmetric(horizontal: 12, vertical: 0),
+                                        border: InputBorder.none,
+                                        isDense: true,
+                                      ),
+                                      onTap: _updateCursorPosition,
+                                    ),
+                                  ),
+                                ),
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                    ),
+                  );
+                },
+              ),
             ),
-          ),
-        ],
+            
+            // 상태바 (항상 화면 하단에 고정)
+            Container(
+              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+              decoration: BoxDecoration(
+                color: Theme.of(context).colorScheme.surfaceContainerHighest,
+                border: Border(top: BorderSide(color: Theme.of(context).dividerColor)),
+              ),
+              child: SafeArea(
+                top: false,
+                child: Row(
+                  children: [
+                    Icon(Icons.description_outlined, size: 14, color: Theme.of(context).colorScheme.onSurface.withOpacity(0.6)),
+                    const SizedBox(width: 6),
+                    Text(
+                      "줄 $lineCount",
+                      style: TextStyle(
+                        fontSize: 12,
+                        color: Theme.of(context).colorScheme.onSurface.withOpacity(0.7),
+                      ),
+                    ),
+                    const SizedBox(width: 16),
+                    Icon(Icons.text_fields, size: 14, color: Theme.of(context).colorScheme.onSurface.withOpacity(0.6)),
+                    const SizedBox(width: 6),
+                    Text(
+                      "${_controller.text.length}자",
+                      style: TextStyle(
+                        fontSize: 12,
+                        color: Theme.of(context).colorScheme.onSurface.withOpacity(0.7),
+                      ),
+                    ),
+                    const Spacer(),
+                    if (_isDirty)
+                      Container(
+                        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
+                        decoration: BoxDecoration(
+                          color: Colors.orange.withOpacity(0.2),
+                          borderRadius: BorderRadius.circular(4),
+                        ),
+                        child: const Row(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            Icon(Icons.circle, size: 8, color: Colors.orange),
+                            SizedBox(width: 4),
+                            Text(
+                              "수정됨",
+                              style: TextStyle(fontSize: 11, color: Colors.orange, fontWeight: FontWeight.w500),
+                            ),
+                          ],
+                        ),
+                      ),
+                  ],
+                ),
+              ),
+            ),
+          ],
+        ),
       ),
     );
   }

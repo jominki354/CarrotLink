@@ -124,7 +124,8 @@ class GitHubService {
     }
   }
 
-  Future<bool> uploadPublicKey(String title, String key) async {
+  /// Uploads a public key and returns the created key's ID, or null on failure.
+  Future<int?> uploadPublicKey(String title, String key) async {
     final token = await getToken();
     if (token == null) throw Exception("Not logged in");
 
@@ -142,148 +143,14 @@ class GitHubService {
     );
 
     if (response.statusCode == 201) {
-      return true;
+      final data = jsonDecode(response.body);
+      return data['id'] as int?;
     } else {
       throw Exception("Failed to upload key: ${response.body}");
     }
   }
 
-  // Simple RSA Key Generation using PointyCastle
-  Future<Map<String, String>> generateRSAKeyPair() async {
-    return await compute(_generateRSAKeyPairIsolate, null);
-  }
-
-  static Map<String, String> _generateRSAKeyPairIsolate(_) {
-    final secureRandom = SecureRandom('Fortuna')
-      ..seed(KeyParameter(Uint8List.fromList(List.generate(32, (_) => Random.secure().nextInt(255)))));
-
-    final keyGen = RSAKeyGenerator()
-      ..init(ParametersWithRandom(
-        RSAKeyGeneratorParameters(BigInt.parse('65537'), 2048, 64),
-        secureRandom,
-      ));
-
-    final pair = keyGen.generateKeyPair();
-    final public = pair.publicKey as RSAPublicKey;
-    final private = pair.privateKey as RSAPrivateKey;
-
-    return {
-      'private': _encodePrivateKeyToPem(private),
-      'public': _encodePublicKeyToSsh(public),
-    };
-  }
-
-  static String _encodePrivateKeyToPem(RSAPrivateKey privateKey) {
-    var version = BigInt.zero;
-    var n = privateKey.modulus!;
-    var e = privateKey.publicExponent!;
-    var d = privateKey.privateExponent!;
-    var p = privateKey.p!;
-    var q = privateKey.q!;
-    var dP = d % (p - BigInt.one);
-    var dQ = d % (q - BigInt.one);
-    var qInv = q.modInverse(p);
-
-    var bytes = <int>[];
-    
-    // Sequence content
-    var content = <int>[];
-    content.addAll(_encodeASN1Integer(version));
-    content.addAll(_encodeASN1Integer(n));
-    content.addAll(_encodeASN1Integer(e));
-    content.addAll(_encodeASN1Integer(d));
-    content.addAll(_encodeASN1Integer(p));
-    content.addAll(_encodeASN1Integer(q));
-    content.addAll(_encodeASN1Integer(dP));
-    content.addAll(_encodeASN1Integer(dQ));
-    content.addAll(_encodeASN1Integer(qInv));
-
-    // Sequence header
-    bytes.add(0x30); 
-    _writeASN1Length(bytes, content.length);
-    bytes.addAll(content);
-
-    var base64Data = base64.encode(bytes);
-    var pem = "-----BEGIN RSA PRIVATE KEY-----\n";
-    for (var i = 0; i < base64Data.length; i += 64) {
-      pem += base64Data.substring(i, min(i + 64, base64Data.length)) + "\n";
-    }
-    pem += "-----END RSA PRIVATE KEY-----";
-    return pem;
-  }
-
-  static List<int> _encodeASN1Integer(BigInt v) {
-    var bytes = <int>[];
-    bytes.add(0x02); // Integer tag
-    var content = _encodeBigInt(v);
-    _writeASN1Length(bytes, content.length);
-    bytes.addAll(content);
-    return bytes;
-  }
-
-  static void _writeASN1Length(List<int> bytes, int length) {
-    if (length < 128) {
-      bytes.add(length);
-    } else {
-      var lenBytes = <int>[];
-      while (length > 0) {
-        lenBytes.insert(0, length & 0xFF);
-        length >>= 8;
-      }
-      bytes.add(0x80 | lenBytes.length);
-      bytes.addAll(lenBytes);
-    }
-  }
-
-  static String _encodePublicKeyToSsh(RSAPublicKey publicKey) {
-    final keyType = 'ssh-rsa';
-    final e = publicKey.publicExponent!;
-    final n = publicKey.modulus!;
-
-    final bytes = <int>[];
-    _writeString(bytes, keyType);
-    _writeBigInt(bytes, e);
-    _writeBigInt(bytes, n);
-
-    return '$keyType ${base64.encode(bytes)} CarrotLink';
-  }
-
-  static void _writeString(List<int> buffer, String s) {
-    final bytes = utf8.encode(s);
-    _writeInt(buffer, bytes.length);
-    buffer.addAll(bytes);
-  }
-
-  static void _writeInt(List<int> buffer, int v) {
-    buffer.add((v >> 24) & 0xFF);
-    buffer.add((v >> 16) & 0xFF);
-    buffer.add((v >> 8) & 0xFF);
-    buffer.add(v & 0xFF);
-  }
-
-  static void _writeBigInt(List<int> buffer, BigInt v) {
-    var bytes = _encodeBigInt(v);
-    _writeInt(buffer, bytes.length);
-    buffer.addAll(bytes);
-  }
-  
-  static List<int> _encodeBigInt(BigInt number) {
-    if (number == BigInt.zero) return [0];
-
-    var hex = number.toRadixString(16);
-    if (hex.length % 2 != 0) hex = '0$hex';
-    
-    var bytes = <int>[];
-    for (var i = 0; i < hex.length; i += 2) {
-      bytes.add(int.parse(hex.substring(i, i + 2), radix: 16));
-    }
-
-    // If MSB is set, prepend 0x00 to indicate positive number in 2's complement
-    if ((bytes[0] & 0x80) != 0) {
-      bytes.insert(0, 0x00);
-    }
-    return bytes;
-  }
+  // Key generation moved to SSHKeyHelper
 
   Future<bool> deletePublicKey(int keyId) async {
     final token = await getToken();
@@ -335,5 +202,55 @@ class GitHubService {
       debugPrint("Error parsing key: $e");
       return '';
     }
+  }
+
+  static String _encodePublicKeyToSsh(RSAPublicKey publicKey) {
+    final keyType = 'ssh-rsa';
+    final e = publicKey.publicExponent!;
+    final n = publicKey.modulus!;
+
+    final bytes = <int>[];
+    _writeString(bytes, keyType);
+    _writeBigInt(bytes, e);
+    _writeBigInt(bytes, n);
+
+    return '$keyType ${base64.encode(bytes)} CarrotLink';
+  }
+
+  static void _writeString(List<int> buffer, String s) {
+    final bytes = utf8.encode(s);
+    _writeInt(buffer, bytes.length);
+    buffer.addAll(bytes);
+  }
+
+  static void _writeInt(List<int> buffer, int v) {
+    buffer.add((v >> 24) & 0xFF);
+    buffer.add((v >> 16) & 0xFF);
+    buffer.add((v >> 8) & 0xFF);
+    buffer.add(v & 0xFF);
+  }
+
+  static void _writeBigInt(List<int> buffer, BigInt v) {
+    var bytes = _encodeBigInt(v);
+    _writeInt(buffer, bytes.length);
+    buffer.addAll(bytes);
+  }
+  
+  static List<int> _encodeBigInt(BigInt number) {
+    if (number == BigInt.zero) return [0];
+
+    var hex = number.toRadixString(16);
+    if (hex.length % 2 != 0) hex = '0$hex';
+    
+    var bytes = <int>[];
+    for (var i = 0; i < hex.length; i += 2) {
+      bytes.add(int.parse(hex.substring(i, i + 2), radix: 16));
+    }
+
+    // If MSB is set, prepend 0x00 to indicate positive number in 2's complement
+    if ((bytes[0] & 0x80) != 0) {
+      bytes.insert(0, 0x00);
+    }
+    return bytes;
   }
 }

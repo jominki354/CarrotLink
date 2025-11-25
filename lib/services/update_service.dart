@@ -13,7 +13,8 @@ class UpdateService extends ChangeNotifier {
   double _downloadProgress = 0.0;
   String? _downloadedFilePath;
   Map<String, dynamic>? _latestRelease;
-  String _currentVersion = "";
+  String _currentVersion = "";  // 표시용 (예: 1.1007.2)
+  String _currentVersionFull = "";  // 비교용 (예: 1.1007.2+19)
   String _statusMessage = "";
   String _channel = "stable"; // stable or dev
 
@@ -23,6 +24,7 @@ class UpdateService extends ChangeNotifier {
   String? get downloadedFilePath => _downloadedFilePath;
   Map<String, dynamic>? get latestRelease => _latestRelease;
   String get currentVersion => _currentVersion;
+  String get currentVersionFull => _currentVersionFull;
   String get statusMessage => _statusMessage;
   String get channel => _channel;
 
@@ -33,7 +35,12 @@ class UpdateService extends ChangeNotifier {
 
   Future<void> _loadVersion() async {
     final info = await PackageInfo.fromPlatform();
-    _currentVersion = "${info.version}+${info.buildNumber}";
+    // 표시용: 버전만 (예: 1.1007.2)
+    _currentVersion = info.version;
+    // 비교용: 버전+빌드번호 (예: 1.1007.2+19)
+    _currentVersionFull = info.buildNumber.isNotEmpty 
+        ? "${info.version}+${info.buildNumber}" 
+        : info.version;
     notifyListeners();
   }
 
@@ -95,12 +102,11 @@ class UpdateService extends ChangeNotifier {
 
       if (releaseData != null) {
         final String tagName = releaseData['tag_name'] ?? "";
-        // Remove 'v' prefix and build metadata (after +)
-        final latestVersion = tagName.replaceAll('v', '').split('+')[0];
-        final currentVersionBase = _currentVersion.split('+')[0];
+        // Remove 'v' prefix only (keep build metadata for comparison)
+        final latestVersion = tagName.replaceAll('v', '');
 
-        // Compare versions
-        if (_isNewer(latestVersion, currentVersionBase)) {
+        // Compare versions (including build number if present)
+        if (_isNewer(latestVersion, _currentVersionFull)) {
           _latestRelease = releaseData;
           
           // Check if file already exists
@@ -122,8 +128,12 @@ class UpdateService extends ChangeNotifier {
 
   bool _isNewer(String remote, String current) {
     try {
-      List<int> rParts = remote.split('.').map((e) => int.parse(e)).toList();
-      List<int> cParts = current.split('.').map((e) => int.parse(e)).toList();
+      // 빌드 메타데이터 (+숫자) 제거
+      final remoteBase = remote.split('+')[0];
+      final currentBase = current.split('+')[0];
+      
+      List<int> rParts = remoteBase.split('.').map((e) => int.parse(e)).toList();
+      List<int> cParts = currentBase.split('.').map((e) => int.parse(e)).toList();
 
       // Pad with zeros if lengths differ (e.g. 1.0 vs 1.0.0)
       while (rParts.length < 3) rParts.add(0);
@@ -133,10 +143,15 @@ class UpdateService extends ChangeNotifier {
         if (rParts[i] > cParts[i]) return true;
         if (rParts[i] < cParts[i]) return false;
       }
-      // Equal
-      return false;
+      
+      // 버전이 같으면 빌드 번호 비교 (있는 경우)
+      final remoteBuild = remote.contains('+') ? int.tryParse(remote.split('+')[1]) ?? 0 : 0;
+      final currentBuild = current.contains('+') ? int.tryParse(current.split('+')[1]) ?? 0 : 0;
+      
+      return remoteBuild > currentBuild;
     } catch (e) {
       // Fallback to string comparison if parsing fails
+      debugPrint("Version comparison failed: $e");
       return remote != current;
     }
   }

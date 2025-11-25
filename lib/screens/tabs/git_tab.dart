@@ -167,13 +167,20 @@ class _GitTabState extends State<GitTab> {
           .map((e) {
             final parts = e.split('|');
             final fullName = parts[0];
-            // Remove 'origin/' prefix safely using regex
-            final name = fullName.replaceFirst(RegExp(r'^origin\/'), '');
+            // Remove 'origin/' prefix - handle multiple possible formats
+            String name = fullName;
+            if (name.startsWith('origin/')) {
+              name = name.substring(7);
+            } else if (name.contains('/')) {
+              // For cases like refs/remotes/origin/branch
+              final lastSlash = name.lastIndexOf('/');
+              name = name.substring(lastSlash + 1);
+            }
             final date = parts.length > 1 ? parts[1] : "";
             final hash = parts.length > 2 ? parts[2] : "";
             return {'name': name, 'date': date, 'hash': hash, 'fullName': fullName};
           })
-          .where((b) => b['name'] != 'HEAD') // Filter out HEAD
+          .where((b) => b['name'] != 'HEAD' && b['name'] != 'origin' && b['name']!.isNotEmpty) // Filter out HEAD, origin and empty names
           .toList();
 
       // Check for updates (ahead count) for each branch relative to local

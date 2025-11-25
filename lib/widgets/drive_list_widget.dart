@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:convert';
 import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
@@ -6,6 +7,7 @@ import 'package:path_provider/path_provider.dart';
 import 'package:url_launcher/url_launcher.dart';
 import 'package:share_plus/share_plus.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+import 'package:http/http.dart' as http;
 import '../services/ssh_service.dart';
 import 'package:dartssh2/dartssh2.dart';
 import 'design_components.dart';
@@ -287,6 +289,9 @@ class _SegmentTileState extends State<SegmentTile> {
   File? _thumbnail;
   bool _loading = false;
   bool _sharing = false;
+  String? _dateStr;
+  String? _sizeStr;
+  bool _infoLoaded = false;
   
   // Static queue to limit concurrent ffmpeg processes
   static int _activeGenerations = 0;
@@ -296,6 +301,96 @@ class _SegmentTileState extends State<SegmentTile> {
   void initState() {
     super.initState();
     _loadThumbnail();
+    _loadSegmentInfo();
+  }
+
+  Future<void> _loadSegmentInfo() async {
+    if (_infoLoaded) return;
+    
+    try {
+      // 1. 폴더 이름에서 날짜 파싱 (예: 2024-11-25--14-30-00)
+      // route 형식: 2024-11-25--14-30-00 또는 20241125--143000
+      String? month, day, hour, minute;
+      
+      // 형식 1: 2024-11-25--14-30-00
+      if (widget.route.contains('-') && widget.route.contains('--')) {
+        final routeParts = widget.route.split('--');
+        if (routeParts.length >= 2) {
+          final datePart = routeParts[0]; // 2024-11-25
+          final timePart = routeParts[1]; // 14-30-00
+          
+          final dateComponents = datePart.split('-');
+          final timeComponents = timePart.split('-');
+          
+          if (dateComponents.length >= 3 && timeComponents.length >= 2) {
+            month = dateComponents[1];
+            day = dateComponents[2];
+            hour = timeComponents[0];
+            minute = timeComponents[1];
+          }
+        }
+      }
+      // 형식 2: 20241125--143000 (8자리 날짜)
+      else if (widget.route.length >= 17) {
+        final routeParts = widget.route.split('--');
+        if (routeParts.isNotEmpty && routeParts[0].length >= 8) {
+          final datePart = routeParts[0];
+          month = datePart.substring(4, 6);
+          day = datePart.substring(6, 8);
+          if (routeParts.length >= 2 && routeParts[1].length >= 4) {
+            final timePart = routeParts[1];
+            hour = timePart.substring(0, 2);
+            minute = timePart.substring(2, 4);
+          }
+        }
+      }
+      
+      if (month != null && day != null) {
+        if (hour != null && minute != null) {
+          _dateStr = '$month/$day $hour:$minute';
+        } else {
+          _dateStr = '$month/$day';
+        }
+      }
+      
+      // 2. Fleet Manager API로 크기 가져오기 (선택적)
+      final ssh = Provider.of<SSHService>(context, listen: false);
+      if (ssh.isConnected && ssh.connectedIp != null) {
+        try {
+          final segmentIndex = widget.segment.split('--').last;
+          final folderPath = '/data/media/0/realdata/${widget.route}--$segmentIndex';
+          final url = 'http://${ssh.connectedIp}:8082/folder-info?path=$folderPath';
+          
+          final response = await http.get(Uri.parse(url)).timeout(const Duration(seconds: 3));
+          if (response.statusCode == 200) {
+            final data = json.decode(response.body);
+            if (data['status'] == 'success' && data['size'] != null) {
+              final totalSize = data['size'] as int;
+              if (totalSize > 0) {
+                if (totalSize >= 1024 * 1024 * 1024) {
+                  _sizeStr = '${(totalSize / (1024 * 1024 * 1024)).toStringAsFixed(1)}GB';
+                } else if (totalSize >= 1024 * 1024) {
+                  _sizeStr = '${(totalSize / (1024 * 1024)).toStringAsFixed(1)}MB';
+                } else if (totalSize >= 1024) {
+                  _sizeStr = '${(totalSize / 1024).toStringAsFixed(0)}KB';
+                } else {
+                  _sizeStr = '${totalSize}B';
+                }
+              }
+            }
+          }
+        } catch (e) {
+          // Fleet Manager API 실패 시 무시 (날짜만 표시)
+        }
+      }
+      
+      _infoLoaded = true;
+      if (mounted) setState(() {});
+    } catch (e) {
+      // Ignore errors
+      _infoLoaded = true;
+      if (mounted) setState(() {});
+    }
   }
 
   Future<void> _shareSegment() async {
@@ -449,8 +544,28 @@ class _SegmentTileState extends State<SegmentTile> {
     }
   }
 
+  String _buildSubtitle() {
+    if (!_infoLoaded) return '로딩...';
+    
+    final parts = <String>[];
+    if (_dateStr != null && _dateStr!.isNotEmpty) {
+      parts.add(_dateStr!);
+    }
+    if (_sizeStr != null && _sizeStr!.isNotEmpty) {
+      parts.add(_sizeStr!);
+    }
+    
+    if (parts.isEmpty) {
+      return '세그먼트 ${widget.index}';
+    }
+    return parts.join(' · ');
+  }
+
   @override
   Widget build(BuildContext context) {
+    // 세그먼트 번호 추출 (--뒤의 숫자)
+    final segmentNum = widget.segment.split('--').last;
+    
     return ListTile(
       leading: Container(
         width: 80,
@@ -463,14 +578,14 @@ class _SegmentTileState extends State<SegmentTile> {
                 : const Icon(Icons.play_circle_outline)),
       ),
       title: Text(
-        widget.segment,
+        'Segment $segmentNum',
         style: const TextStyle(fontSize: 14),
         maxLines: 1,
         overflow: TextOverflow.ellipsis,
       ),
       subtitle: Text(
-        widget.segment,
-        style: const TextStyle(fontSize: 10, color: Colors.grey),
+        _buildSubtitle(),
+        style: const TextStyle(fontSize: 11, color: Colors.grey),
         maxLines: 1,
         overflow: TextOverflow.ellipsis,
       ),

@@ -10,6 +10,7 @@ import '../../services/backup_service.dart';
 import '../../services/google_drive_service.dart';
 import '../../services/update_service.dart';
 import '../../widgets/custom_toast.dart';
+import '../../widgets/update_dialog.dart';
 import 'tabs/home_tab.dart';
 import 'tabs/git_tab.dart';
 import 'tabs/system_tab.dart';
@@ -65,7 +66,7 @@ class _DashboardScreenState extends State<DashboardScreen> with WidgetsBindingOb
     if (hasUpdate && mounted) {
       showDialog(
         context: context,
-        builder: (ctx) => const UpdateDialog(),
+        builder: (ctx) => UpdateDialog(),
       );
     }
   }
@@ -130,8 +131,17 @@ class _DashboardScreenState extends State<DashboardScreen> with WidgetsBindingOb
     final storage = const FlutterSecureStorage();
     final ip = await storage.read(key: 'ssh_ip');
     final username = await storage.read(key: 'ssh_username');
-    final key = await storage.read(key: 'user_private_key');
+    final key = await storage.read(key: 'current_private_key');
     final password = await storage.read(key: 'ssh_password');
+    
+    // 키 사용 시, 키가 검증되지 않았으면 자동 재연결 하지 않음
+    if (key != null && silent) {
+      final keyVerified = await storage.read(key: 'key_verified');
+      if (keyVerified != 'true') {
+        // 키가 아직 검증되지 않음 - 자동 재연결 스킵
+        return;
+      }
+    }
 
     if (ip != null && username != null) {
       // Quick ping check before full connect attempt

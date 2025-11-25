@@ -44,17 +44,11 @@ class SSHService extends ChangeNotifier {
     final ip = await _storage.read(key: 'ssh_ip');
     final username = await _storage.read(key: 'ssh_username');
     final password = await _storage.read(key: 'ssh_password');
-    final keyPath = await _storage.read(key: 'ssh_key_path');
+    
+    // 새로운 키 저장 구조에서 로드
+    final privateKey = await _storage.read(key: 'current_private_key');
 
     if (ip != null && username != null) {
-      String? privateKey;
-      if (keyPath != null) {
-        try {
-          privateKey = await File(keyPath).readAsString();
-        } catch (e) {
-          print("Failed to read key file: $e");
-        }
-      }
       // Reconnect using standard flow
       connect(ip, username, password: password, privateKey: privateKey);
     }
@@ -70,10 +64,14 @@ class SSHService extends ChangeNotifier {
   String? get targetIp => _targetIp;
 
   // IP Discovery
-  final StreamController<String> _ipDiscoveryController = StreamController<String>.broadcast();
-  Stream<String> get ipDiscoveryStream => _ipDiscoveryController.stream;
+  StreamController<String>? _ipDiscoveryController;
+  Stream<String> get ipDiscoveryStream {
+    _ipDiscoveryController ??= StreamController<String>.broadcast();
+    return _ipDiscoveryController!.stream;
+  }
   RawDatagramSocket? _udpSocket;
   Timer? _heartbeatTimer;
+  bool _isDiscoveryActive = false;
 
   bool _isConnecting = false;
   bool get isConnecting => _isConnecting;
@@ -99,18 +97,25 @@ class SSHService extends ChangeNotifier {
 
       if (privateKey != null) {
         try {
+          print("Debug: Attempting to parse PEM key...");
+          print("Debug: Key starts with: ${privateKey.substring(0, 50)}...");
+          
           final keys = SSHKeyPair.fromPem(privateKey);
           print("Debug: Parsed ${keys.length} keys from PEM.");
+          
           if (keys.isEmpty) {
              throw Exception("No valid keys found in the provided PEM.");
           }
+          
+          print("Debug: Key type: ${keys.first.type}");
+          
           _client = SSHClient(
             socket,
             username: username,
             identities: keys,
           );
         } catch (e) {
-          print("Debug: Key parsing failed: $e");
+          print("Debug: Key parsing/auth failed: $e");
           rethrow;
         }
       } else {
@@ -132,6 +137,11 @@ class SSHService extends ChangeNotifier {
 
       _connectionStatus = "Connected";
       _connectedIp = ip; // Set IP only after successful connection
+      
+      // 키 인증 성공 시 key_verified = true 설정
+      if (privateKey != null) {
+        await _storage.write(key: 'key_verified', value: 'true');
+      }
       
       // Start Background Service Connection
       FlutterBackgroundService().invoke('connect', {
@@ -416,8 +426,17 @@ class SSHService extends ChangeNotifier {
   }
 
   Future<void> startDiscovery() async {
+    if (_isDiscoveryActive) return; // 중복 실행 방지
+    _isDiscoveryActive = true;
+    
+    // 컨트롤러 재생성 (닫혀있을 수 있음)
+    if (_ipDiscoveryController == null || _ipDiscoveryController!.isClosed) {
+      _ipDiscoveryController = StreamController<String>.broadcast();
+    }
+    
     // 1. Start UDP Listener (Passive)
     try {
+      _udpSocket?.close();
       _udpSocket = await RawDatagramSocket.bind(InternetAddress.anyIPv4, 7705);
       _udpSocket!.listen((RawSocketEvent event) {
         if (event == RawSocketEvent.read) {
@@ -428,13 +447,17 @@ class SSHService extends ChangeNotifier {
               final data = json.decode(message);
               if (data is Map<String, dynamic> && data.containsKey('ip')) {
                 final ip = data['ip'] as String;
-                _ipDiscoveryController.add(ip);
+                if (_ipDiscoveryController != null && !_ipDiscoveryController!.isClosed) {
+                  _ipDiscoveryController!.add(ip);
+                }
               }
             } catch (e) {
               // Ignore malformed messages
             }
           }
         }
+      }, onError: (e) {
+        print("UDP listen error: $e");
       });
     } catch (e) {
       print("Error binding UDP socket: $e");
@@ -482,7 +505,9 @@ class SSHService extends ChangeNotifier {
     try {
       final socket = await Socket.connect(ip, port, timeout: const Duration(milliseconds: 500));
       socket.destroy();
-      _ipDiscoveryController.add(ip);
+      if (_ipDiscoveryController != null && !_ipDiscoveryController!.isClosed) {
+        _ipDiscoveryController!.add(ip);
+      }
       print("Found openpilot at $ip");
     } catch (e) {
       // Connection failed or timed out
@@ -490,6 +515,7 @@ class SSHService extends ChangeNotifier {
   }
 
   void stopDiscovery() {
+    _isDiscoveryActive = false;
     _udpSocket?.close();
     _udpSocket = null;
   }
@@ -527,7 +553,8 @@ class SSHService extends ChangeNotifier {
   @override
   void dispose() {
     stopDiscovery();
-    _ipDiscoveryController.close();
+    _ipDiscoveryController?.close();
+    _ipDiscoveryController = null;
     super.dispose();
   }
 }
