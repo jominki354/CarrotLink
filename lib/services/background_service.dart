@@ -13,7 +13,6 @@ const int notificationId = 888;
 
 // Actions
 const String actionDisconnect = 'disconnect';
-const String actionExit = 'exit';
 
 Future<void> initializeService() async {
   final service = FlutterBackgroundService();
@@ -24,6 +23,7 @@ Future<void> initializeService() async {
     'CarrotLink Service',
     description: 'CarrotLink 백그라운드 연결 유지 서비스',
     importance: Importance.low,
+    showBadge: false,
   );
 
   final FlutterLocalNotificationsPlugin flutterLocalNotificationsPlugin =
@@ -40,8 +40,6 @@ Future<void> initializeService() async {
     onDidReceiveNotificationResponse: (NotificationResponse response) {
       if (response.actionId == actionDisconnect) {
         service.invoke('disconnect');
-      } else if (response.actionId == actionExit) {
-        service.invoke('stopService');
       }
     },
   );
@@ -112,14 +110,8 @@ void onStart(ServiceInstance service) async {
               'CarrotLink Service',
               icon: '@mipmap/launcher_icon',
               ongoing: true,
-              actions: [
-                const AndroidNotificationAction(
-                  actionExit,
-                  '앱 종료',
-                  showsUserInterface: false,
-                  cancelNotification: false,
-                ),
-              ],
+              showWhen: false,
+              number: 0,
             ),
           ),
         );

@@ -5,6 +5,7 @@ import 'package:provider/provider.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:permission_handler/permission_handler.dart';
 import 'package:flutter_background_service/flutter_background_service.dart';
+import 'package:connectivity_plus/connectivity_plus.dart';
 import '../../services/ssh_service.dart';
 import '../../services/backup_service.dart';
 import '../../services/google_drive_service.dart';
@@ -31,6 +32,11 @@ class _DashboardScreenState extends State<DashboardScreen> with WidgetsBindingOb
   int _currentIndex = 0;
   DateTime? _lastPressedAt;
   Timer? _reconnectTimer;
+  StreamSubscription<String>? _discoverySubscription;
+  StreamSubscription<List<ConnectivityResult>>? _connectivitySubscription;
+  DateTime? _lastDiscoveryTime;
+  static const _discoveryCooldown = Duration(minutes: 5);
+  List<ConnectivityResult>? _lastConnectivity;
 
   final List<Widget> _tabs = const [
     HomeTab(),
@@ -47,6 +53,8 @@ class _DashboardScreenState extends State<DashboardScreen> with WidgetsBindingOb
     _requestPermissions();
     _tryAutoConnect();
     _startReconnectLoop();
+    _setupDiscoveryListener();
+    _setupConnectivityListener();
     
     // Start global backup monitoring
     WidgetsBinding.instance.addPostFrameCallback((_) {
@@ -93,7 +101,97 @@ class _DashboardScreenState extends State<DashboardScreen> with WidgetsBindingOb
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
     _reconnectTimer?.cancel();
+    _discoverySubscription?.cancel();
+    _connectivitySubscription?.cancel();
     super.dispose();
+  }
+
+  void _setupConnectivityListener() {
+    _connectivitySubscription = Connectivity().onConnectivityChanged.listen((results) async {
+      // 네트워크가 없다가 생긴 경우 또는 네트워크 종류가 변경된 경우
+      final hasNetwork = results.isNotEmpty && !results.contains(ConnectivityResult.none);
+      final hadNetwork = _lastConnectivity != null && 
+          _lastConnectivity!.isNotEmpty && 
+          !_lastConnectivity!.contains(ConnectivityResult.none);
+      
+      debugPrint('[Dashboard] Connectivity changed: $results (was: $_lastConnectivity)');
+      
+      // 네트워크가 새로 연결되었거나 종류가 변경됨
+      if (hasNetwork && (!hadNetwork || _lastConnectivity != results)) {
+        final ssh = Provider.of<SSHService>(context, listen: false);
+        
+        // 연결이 끊어진 상태면 즉시 재연결 시도
+        if (!ssh.isConnected && !ssh.isConnecting) {
+          debugPrint('[Dashboard] Network changed - attempting reconnect');
+          
+          // 짧은 대기 후 재연결 (네트워크 안정화)
+          await Future.delayed(const Duration(milliseconds: 500));
+          
+          // 기존 IP로 연결 시도, 실패하면 Discovery 시작
+          await _tryAutoConnect();
+        }
+      }
+      
+      _lastConnectivity = results;
+    });
+  }
+
+  void _setupDiscoveryListener() {
+    final ssh = Provider.of<SSHService>(context, listen: false);
+    _discoverySubscription = ssh.ipDiscoveryStream.listen((discoveredIp) async {
+      if (!mounted) return;
+      
+      final storage = const FlutterSecureStorage();
+      final storedIp = await storage.read(key: 'ssh_ip');
+      
+      // IP가 변경된 경우에만 처리
+      if (storedIp != discoveredIp) {
+        debugPrint('[Dashboard] Discovery found new IP: $discoveredIp (was: $storedIp)');
+        
+        // 새 IP 저장
+        await storage.write(key: 'ssh_ip', value: discoveredIp);
+        
+        if (mounted) {
+          CustomToast.show(context, '기기 발견: $discoveredIp');
+        }
+        
+        // 키가 검증된 경우 자동 연결 시도
+        final keyVerified = await storage.read(key: 'key_verified');
+        if (keyVerified == 'true' && !ssh.isConnected && !ssh.isConnecting) {
+          final username = await storage.read(key: 'ssh_username');
+          final key = await storage.read(key: 'current_private_key');
+          final password = await storage.read(key: 'ssh_password');
+          
+          if (username != null) {
+            try {
+              await ssh.connect(discoveredIp, username, password: password, privateKey: key);
+              ssh.stopDiscovery();
+            } catch (e) {
+              debugPrint('[Dashboard] Auto-connect to new IP failed: $e');
+            }
+          }
+        }
+      }
+    });
+  }
+
+  void _startDiscoveryIfNeeded() {
+    final now = DateTime.now();
+    if (_lastDiscoveryTime != null && 
+        now.difference(_lastDiscoveryTime!) < _discoveryCooldown) {
+      debugPrint('[Dashboard] Discovery skipped - cooldown active');
+      return;
+    }
+    
+    _lastDiscoveryTime = now;
+    final ssh = Provider.of<SSHService>(context, listen: false);
+    debugPrint('[Dashboard] Starting IP discovery...');
+    ssh.startDiscovery();
+    
+    // 30초 후 자동 중지
+    Future.delayed(const Duration(seconds: 30), () {
+      ssh.stopDiscovery();
+    });
   }
 
   @override
@@ -134,6 +232,8 @@ class _DashboardScreenState extends State<DashboardScreen> with WidgetsBindingOb
     final key = await storage.read(key: 'current_private_key');
     final password = await storage.read(key: 'ssh_password');
     
+    debugPrint('[Dashboard] Auto-connect - IP: $ip, Username: $username');
+    
     // 키 사용 시, 키가 검증되지 않았으면 자동 재연결 하지 않음
     if (key != null && silent) {
       final keyVerified = await storage.read(key: 'key_verified');
@@ -155,9 +255,15 @@ class _DashboardScreenState extends State<DashboardScreen> with WidgetsBindingOb
           CustomToast.show(context, '자동 연결됨: $ip');
         }
       } catch (e) {
-        // Silent fail if unreachable
-        if (!silent) print("Auto-connect failed: $e");
+        // 연결 실패 시 IP Discovery 시작
+        if (!silent) {
+          debugPrint('[Dashboard] Auto-connect failed: $e - starting discovery');
+        }
+        _startDiscoveryIfNeeded();
       }
+    } else {
+      // IP가 없는 경우에도 Discovery 시작
+      _startDiscoveryIfNeeded();
     }
   }
 

@@ -112,6 +112,39 @@ class _GitTabState extends State<GitTab> {
     }
   }
 
+  Future<void> _rebootDevice(BuildContext context) async {
+    final ssh = Provider.of<SSHService>(context, listen: false);
+    if (!ssh.isConnected) {
+      CustomToast.show(context, "기기와 연결되어 있지 않습니다.", isError: true);
+      return;
+    }
+
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text("기기 재부팅"),
+        content: const Text("기기를 재부팅하시겠습니까?"),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text("취소")),
+          ElevatedButton(
+            onPressed: () => Navigator.pop(ctx, true),
+            style: ElevatedButton.styleFrom(
+              backgroundColor: Colors.red,
+              foregroundColor: Colors.white,
+            ),
+            child: const Text("재부팅"),
+          ),
+        ],
+      ),
+    );
+
+    if (confirmed == true && mounted) {
+      _addLog("기기 재부팅 중...");
+      await ssh.executeCommand("sudo reboot");
+      CustomToast.show(context, "재부팅 명령을 전송했습니다.");
+    }
+  }
+
   Future<void> _selectBranch(BuildContext context) async {
     final ssh = Provider.of<SSHService>(context, listen: false);
     if (!ssh.isConnected) {
@@ -401,10 +434,10 @@ class _GitTabState extends State<GitTab> {
                 const SizedBox(height: 12),
                 _buildActionButton(
                   context,
-                  "Rebuild All",
-                  Icons.build,
-                  Colors.purple,
-                  () => _runGitCommand(context, "scons -c && rm .sconsign.dblite", "Rebuild 시작됨"),
+                  "Reboot",
+                  Icons.restart_alt,
+                  Colors.red,
+                  () => _rebootDevice(context),
                 ),
               ],
             ),

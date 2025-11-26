@@ -47,6 +47,8 @@ class SSHService extends ChangeNotifier {
     
     // 새로운 키 저장 구조에서 로드
     final privateKey = await _storage.read(key: 'current_private_key');
+    
+    print('[SSHService] Reconnect from storage - IP: $ip, Username: $username');
 
     if (ip != null && username != null) {
       // Reconnect using standard flow
