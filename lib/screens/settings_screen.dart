@@ -236,6 +236,8 @@ class _ConnectionSettingsScreenState extends State<ConnectionSettingsScreen> {
     final username = await _storage.read(key: 'ssh_username');
     final password = await _storage.read(key: 'ssh_password');
     
+    debugPrint('[Settings] Loaded IP: $ip, Username: $username');
+    
     // 새 구조에서 키 로드
     final keyType = await _storage.read(key: 'current_key_type');
     final privateKey = await _storage.read(key: 'current_private_key');
@@ -576,9 +578,13 @@ class _ConnectionSettingsScreenState extends State<ConnectionSettingsScreen> {
       ssh.startDiscovery();
       _discoverySubscription = ssh.ipDiscoveryStream.listen(
         (ip) {
-          if (mounted && _ipController.text.isEmpty) {
+          // 검색된 IP로 항상 업데이트 (자동 검색 우선)
+          if (mounted && _ipController.text != ip) {
             setState(() => _ipController.text = ip);
             CustomToast.show(context, "기기 발견: $ip");
+            // 새 IP 발견 시 저장
+            _storage.write(key: 'ssh_ip', value: ip);
+            debugPrint('[Settings] Auto-discovered IP: $ip (saved)');
           }
         },
         onError: (e) => debugPrint("Discovery error: $e"),
@@ -590,14 +596,21 @@ class _ConnectionSettingsScreenState extends State<ConnectionSettingsScreen> {
 
   Future<void> _connect() async {
     final ssh = Provider.of<SSHService>(context, listen: false);
+    
+    // 연결 시도 전에 IP 먼저 저장 (연결 실패해도 IP는 저장됨)
+    final ipToSave = _ipController.text.trim();
+    final usernameToSave = _usernameController.text.trim();
+    debugPrint('[Settings] Saving IP before connect: $ipToSave');
+    await _storage.write(key: 'ssh_ip', value: ipToSave);
+    await _storage.write(key: 'ssh_username', value: usernameToSave);
+    
     try {
       String? privateKey = _useKey ? _currentPrivateKey : null;
       String? password = !_useKey ? _passwordController.text : null;
       
-      await ssh.connect(_ipController.text, _usernameController.text, password: password, privateKey: privateKey);
+      await ssh.connect(ipToSave, usernameToSave, password: password, privateKey: privateKey);
       
-      await _storage.write(key: 'ssh_ip', value: _ipController.text);
-      await _storage.write(key: 'ssh_username', value: _usernameController.text);
+      debugPrint('[Settings] Connection successful, IP saved: $ipToSave');
       if (password != null) {
         await _storage.write(key: 'ssh_password', value: password);
       }
@@ -607,6 +620,7 @@ class _ConnectionSettingsScreenState extends State<ConnectionSettingsScreen> {
         Navigator.pop(context);
       }
     } catch (e) {
+      debugPrint('[Settings] Connection failed: $e (IP was saved: $ipToSave)');
       if (mounted) {
         CustomToast.show(context, '연결 실패: $e', isError: true);
       }

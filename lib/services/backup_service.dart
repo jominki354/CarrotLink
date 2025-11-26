@@ -185,16 +185,23 @@ class BackupService extends ChangeNotifier {
     service.invoke("stopService");
   }
 
-  Future<void> createBackup(SSHService ssh, GoogleDriveService driveService, {bool isAuto = false}) async {
+  Future<void> createBackup(SSHService ssh, GoogleDriveService driveService, {bool isAuto = false, int retryCount = 0}) async {
     if (_isBackingUp) return;
+    
+    const maxRetries = 3;
 
     _isBackingUp = true;
     _progress = 0.0;
-    _statusMessage = "파라미터 목록 가져오는 중...";
+    _statusMessage = retryCount > 0 ? "재시도 중 ($retryCount/$maxRetries)..." : "파라미터 목록 가져오는 중...";
     notifyListeners();
     _updateNotification("백업 진행 중...");
 
     try {
+      // 연결 상태 확인
+      if (!ssh.isConnected) {
+        throw Exception("SSH 연결이 끊어졌습니다.");
+      }
+      
       // Get branch name
       String branch = "unknown";
       try {
@@ -224,50 +231,64 @@ class BackupService extends ChangeNotifier {
       int current = 0;
       final total = keys.length;
 
-      // Optimize: Read all params in one go if possible, but for now keep loop or optimize later.
-      // To speed up, we can try to read all at once, but let's stick to reliability for now or use the grep trick here too?
-      // The user complained about comparison speed, not backup speed. But backup speed is also important.
-      // Let's use the grep trick here too for speed!
-      
       _statusMessage = "데이터 읽는 중...";
       notifyListeners();
 
-      // Fetch all params at once using grep
-      final allParamsResult = await ssh.executeCommand("grep -r . /data/params/d/");
-      final Map<String, String> currentParams = {};
+      // 방법 1: 배치로 여러 파일을 한번에 읽기 (빠름)
+      // xargs와 cat을 사용하여 여러 파일을 한번에 읽음
+      // 형식: ===KEY=== 로 구분
+      final keysString = keys.join(' ');
+      final batchCmd = '''
+for key in $keysString; do
+  if [ -f "/data/params/d/\$key" ]; then
+    echo "===\$key==="
+    cat "/data/params/d/\$key" 2>/dev/null || true
+  fi
+done
+''';
       
-      if (!allParamsResult.startsWith("Error")) {
-        final lines = allParamsResult.split('\n');
-        for (final line in lines) {
-          final parts = line.split(':');
-          if (parts.length >= 2) {
-            final path = parts[0];
-            final val = parts.sublist(1).join(':'); // Value might contain :
-            final key = path.split('/').last;
-            currentParams[key] = val;
+      final batchResult = await ssh.executeCommand(batchCmd);
+      
+      if (!batchResult.startsWith("Error") && batchResult.contains("===")) {
+        // 결과 파싱
+        String? currentKey;
+        final buffer = StringBuffer();
+        
+        for (final line in batchResult.split('\n')) {
+          if (line.startsWith('===') && line.endsWith('===')) {
+            // 이전 키의 값 저장
+            if (currentKey != null) {
+              backupData[currentKey] = buffer.toString().trim();
+            }
+            // 새 키 시작
+            currentKey = line.substring(3, line.length - 3);
+            buffer.clear();
+          } else if (currentKey != null) {
+            if (buffer.isNotEmpty) buffer.writeln();
+            buffer.write(line);
           }
         }
-      }
-
-      // Filter only keys present in manager.py
-      for (final key in keys) {
-        if (currentParams.containsKey(key)) {
-          backupData[key] = currentParams[key]!;
+        // 마지막 키 저장
+        if (currentKey != null && buffer.isNotEmpty) {
+          backupData[currentKey] = buffer.toString().trim();
         }
       }
       
-      // If grep failed or returned nothing (e.g. no permissions?), fallback to loop?
-      // But grep should work if cat works.
-      // If backupData is empty, maybe try the loop method as fallback.
-      if (backupData.isEmpty && keys.isNotEmpty) {
-         for (final key in keys) {
+      // 방법 2: Fallback - 개별 파일 읽기 (느리지만 확실함)
+      // 배치 방법이 실패했거나 결과가 부족한 경우
+      final missingKeys = keys.where((k) => !backupData.containsKey(k)).toList();
+      
+      if (missingKeys.isNotEmpty) {
+        print("Batch read got ${backupData.length}/${keys.length} keys. Reading ${missingKeys.length} missing keys...");
+        
+        for (final key in missingKeys) {
           current++;
-          _progress = current / total;
-          _statusMessage = "백업 중 (Fallback)... ($current/$total)";
+          _progress = current / missingKeys.length;
+          _statusMessage = "추가 데이터 읽는 중... ($current/${missingKeys.length})";
           notifyListeners();
 
-          final value = await ssh.executeCommand("cat /data/params/d/$key");
-          if (!value.startsWith("Error")) {
+          final value = await ssh.executeCommand("cat /data/params/d/$key 2>/dev/null");
+          if (!value.startsWith("Error") && value.isNotEmpty) {
             backupData[key] = value.trim();
           }
         }
@@ -343,6 +364,35 @@ class BackupService extends ChangeNotifier {
     } catch (e) {
       _statusMessage = "백업 실패: $e";
       print("Backup error: $e");
+      
+      // 네트워크 관련 에러면 재시도
+      final errorStr = e.toString().toLowerCase();
+      final isNetworkError = errorStr.contains('socket') || 
+                             errorStr.contains('connection') || 
+                             errorStr.contains('timeout') ||
+                             errorStr.contains('broken pipe') ||
+                             errorStr.contains('ssh 연결');
+      
+      if (isNetworkError && retryCount < 3) {
+        _isBackingUp = false; // 재시도를 위해 플래그 해제
+        _statusMessage = "네트워크 오류 - ${retryCount + 1}번째 재시도 대기 중...";
+        notifyListeners();
+        
+        // 대기 후 재시도 (5초, 10초, 15초)
+        await Future.delayed(Duration(seconds: 5 * (retryCount + 1)));
+        
+        // 재연결 대기 (최대 10초)
+        for (int i = 0; i < 10; i++) {
+          if (ssh.isConnected) break;
+          await Future.delayed(const Duration(seconds: 1));
+        }
+        
+        if (ssh.isConnected) {
+          print("Retrying backup (attempt ${retryCount + 1})...");
+          await createBackup(ssh, driveService, isAuto: isAuto, retryCount: retryCount + 1);
+          return;
+        }
+      }
     } finally {
       _isBackingUp = false;
       _progress = 0.0;
